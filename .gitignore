@@ -158,3 +158,4 @@ vite.config.ts.timestamp-*
 
 # Bun local cache
 .bun-cache/
+mock/.data/
