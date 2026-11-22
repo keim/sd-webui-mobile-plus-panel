@@ -130,6 +130,13 @@ const generationRequest = z.object({
   sourceJobId: z.number().int().positive().nullable().default(null),
   initSource: z.enum(["job", "upload"]).nullable().default(null),
   denoisingStrength: z.number().min(0).max(1).nullable().default(null),
+  // img2img resize mode (the Editor operation panel's Cover /
+  // Crop / Contain / Latent selector): 0 = just resize (Cover),
+  // 1 = crop and resize (Crop), 2 = resize and fill (Contain),
+  // 3 = just resize in latent space (Latent). Sent only for
+  // plain img2img; inpaint keeps its fixed crop (1) server-side
+  // and txt2img sends null.
+  resizeMode: z.number().int().min(0).max(3).nullable().default(null),
   // Inpaint: when maskDataBase64 is present the job is an inpaint
   // run (mode must be "img2img"; the init image resolves exactly
   // like a plain img2img job). The client exports its painted mask
@@ -305,6 +312,23 @@ export const Actions = {
     response: editorSourceResponse,
   },
   clearEditorSource: {
+    request: z.object({}),
+    response: editorSourceResponse,
+  },
+  // The img2img source slot, independent of the Editor slot:
+  // the image shown in the prompt row's source image area and
+  // used as the img2img / inpaint init image. Uploads land
+  // here; the Editor image is copied here only by the explicit
+  // adopt action (the image area's 元画像に採用 button).
+  getSourceImage: {
+    request: z.object({}),
+    response: editorSourceResponse,
+  },
+  adoptEditorSource: {
+    request: z.object({}),
+    response: editorSourceResponse,
+  },
+  clearSourceImage: {
     request: z.object({}),
     response: editorSourceResponse,
   },

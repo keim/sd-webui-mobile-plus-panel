@@ -17,7 +17,19 @@ type SeedMode = "random" | "fixed" | "reuse";
 // 「その他」 column → Parameter, the history panel's History
 // button → History, and the round 「<」 back buttons on the
 // other panes → Editor).
-type PaneKey = "editor" | "inpaint" | "parameters" | "history";
+// img2img resize modes (sdapi resize_mode values) as offered by
+// the Editor operation panel's selector: Cover = just resize
+// (stretch to cover the target size), Crop = crop and resize,
+// Contain = resize and fill (whole image fits, bands filled),
+// Latent = just resize in latent space.
+const RESIZE_MODES = [
+  { value: 0, label: "Cover" },
+  { value: 1, label: "Crop" },
+  { value: 2, label: "Contain" },
+  { value: 3, label: "Latent" },
+] as const;
+
+type PaneKey = "editor" | "preview" | "inpaint" | "parameters" | "history";
 
 // --- Polling self-recovery (2026-11-21) ------------------------------
 // Every polling request (the jobs list fetch and each
@@ -578,6 +590,7 @@ type SettingsSnapshot = {
   scheduler: string;
   img2imgChecked: boolean;
   denoisingStrength: string;
+  resizeMode: number;
   maskMode: string;
   maskBlur: string;
   brushSize: string;
@@ -610,6 +623,7 @@ function settingsSnapshotOf(v: SettingsSnapshot): SettingsSnapshot {
     scheduler: v.scheduler,
     img2imgChecked: v.img2imgChecked,
     denoisingStrength: v.denoisingStrength,
+    resizeMode: v.resizeMode,
     maskMode: v.maskMode,
     maskBlur: v.maskBlur,
     brushSize: v.brushSize,
@@ -710,6 +724,12 @@ function restoredSettings(
   }
   const dn = savedString(saved.denoisingStrength);
   if (dn != null) next.denoisingStrength = dn;
+  if (
+    saved.resizeMode === 0 || saved.resizeMode === 1 ||
+    saved.resizeMode === 2 || saved.resizeMode === 3
+  ) {
+    next.resizeMode = saved.resizeMode;
+  }
   // Legacy saves stored the denoise under editorDenoise.
   if (dn == null) {
     const legacyDn = savedString(saved.editorDenoise);
@@ -1217,7 +1237,7 @@ export function App() {
   const [tab, setTab] = useState<PaneKey>("editor");
   const [promptFocused, setPromptFocused] = useState(false);
   const [editorPopup, setEditorPopup] = useState<
-    "model" | "style" | "denoise" | "blur" | "brush" | null
+    "model" | "style" | "denoise" | "blur" | "brush" | "resize" | null
   >(null);
 
   // Editor / Inpaint popup dismissal (same general rule as the
@@ -1261,6 +1281,27 @@ export function App() {
     queryKey: ["editorSource"],
     queryFn: () => api.getEditorSource({}),
   });
+  const sourceImageQuery = useQuery({
+    queryKey: ["sourceImage"],
+    queryFn: () => api.getSourceImage({}),
+  });
+  // The img2img source slot, independent of the Editor slot:
+  // the image in the prompt row's source image area, the
+  // Inpaint pane's target, and the init image of img2img /
+  // inpaint generation. It changes only through the source
+  // area (upload / detach) and the image area's adopt button.
+  const sourceImage: EditorSource =
+    sourceImageQuery.data?.source ?? {
+      kind: "none",
+      jobId: null,
+      uploadId: null,
+      resultSeed: null,
+      displayUrl: null,
+      imageUrl: null,
+      mimeType: null,
+      byteSize: null,
+      fileName: null,
+    };
   const editorSource: EditorSource =
     editorSourceQuery.data?.source ?? {
       kind: "none",
@@ -1274,24 +1315,24 @@ export function App() {
       fileName: null,
     };
   const [editorDenoise, setEditorDenoise] = useState("0.5");
-  // Mode toggle state (the single wide button under the Editor
-  // image area): true = the i2i/inpaint side is selected, false =
-  // the txt2img side. It only has an effect while a source image
-  // is set — with no image the mode is txt2img regardless.
-  // Automatic switches TO the i2i/inpaint side: a fresh upload,
-  // and a user image-list selection — tapping an image in the
-  // Editor's merged preview column, or setting one from the
-  // History pane (「Editorへ転送」 on the output tab, 「Editorへ
-  // セット」 on the uploads tab), for jobs and uploads alike
-  // (img2img vs inpaint is then split by mask paint, as before).
-  // Automatic loads that are NOT a user list tap never change
-  // this state: a completed generation's auto-set (the result
-  // simply appears in the Editor) and the Editor delete's
-  // next-image load both leave the toggle exactly as it was.
-  // Clearing the image resets it to false. Manual toggling is
-  // always available while an image is set.
+  // Mode toggle state (the operation panel's mode cell): true =
+  // the img2img(inpaint) side is selected, false = the txt2img
+  // side. It only has an effect while a SOURCE image is set —
+  // with no source image the generation is txt2img regardless.
+  // NOTHING changes this state automatically: uploads, image
+  // selections, generation completions, deletions and detaches
+  // all leave it exactly as the user left it. The single
+  // exception is the image area's adopt button (元画像に採用),
+  // whose very action is "make this the source and switch to
+  // img2img". Manual toggling is always available, with or
+  // without any image.
   // Persisted in the settings backup under its historical key name.
   const [img2imgChecked, setImg2imgChecked] = useState(false);
+  // img2img resize mode for the operation panel's Cover / Crop
+  // / Contain / Latent selector: 0 = Cover (just resize),
+  // 1 = Crop (crop and resize), 2 = Contain (resize and fill),
+  // 3 = Latent (just resize in latent space).
+  const [resizeMode, setResizeMode] = useState(0);
   const [maskMode, setMaskMode] = useState("masked");
   const [maskBlur, setMaskBlur] = useState("0");
   // Inpaint brush: diameter in DISPLAY pixels (4..200 step 4) and
@@ -1303,9 +1344,11 @@ export function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const editorFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Switch the mode toggle to the i2i/inpaint side, saving the
-  // settings snapshot immediately (the same discipline as the
-  // manual toggle). img2img vs inpaint is not decided here: the
+  // Switch the mode toggle to the img2img(inpaint) side, saving
+  // the settings snapshot immediately (the same discipline as
+  // the manual toggle). Used ONLY by the adopt button — the one
+  // place whose action includes the mode switch. img2img vs
+  // inpaint is not decided here: the
   // mask's paint splits the two at generation time.
   function switchToI2iSide() {
     markSettingsImmediate();
@@ -1315,17 +1358,14 @@ export function App() {
   const uploadImage = useMutation({
     mutationFn: api.uploadEditorImage,
     onSuccess: (res) => {
-      void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      // Uploads land in the SOURCE slot (the source image area
+      // is the only upload entry point). The mode toggle is
+      // NOT switched — mode changes are the user's alone (and
+      // the adopt button's).
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
       void queryClient.invalidateQueries({ queryKey: ["uploadImages"] });
       if (!res.ok) {
         setUploadError(res.error ?? "アップロードできませんでした。");
-      } else {
-        // A fresh upload switches the mode toggle to the
-        // i2i/inpaint side — as does a user image-list
-        // selection (see the selection wrappers below).
-        // Automatic loads (a completed generation's auto-set,
-        // the delete-next load) never switch it.
-        switchToI2iSide();
       }
     },
     onError: () =>
@@ -1334,14 +1374,10 @@ export function App() {
       ),
   });
 
-  // The two source-setting mutations themselves never touch the
-  // mode toggle. Whether a successful set also switches the
-  // toggle to the i2i/inpaint side is the CALLER's choice, passed
-  // as a per-call onSuccess: the user-selection wrappers below
-  // (image-list taps and History-pane set buttons) switch it;
-  // the Editor delete's automatic next-image load calls these
-  // same mutations WITHOUT that callback, so it keeps the
-  // toggle's current side.
+  // The two Editor-slot-setting mutations never touch the mode
+  // toggle: an image selection changes which image the image
+  // area shows, nothing else. (The img2img source slot has its
+  // own mutations below.)
   const setSourceFromJob = useMutation({
     mutationFn: api.setEditorSourceFromJob,
     onSuccess: (res) => {
@@ -1364,68 +1400,69 @@ export function App() {
     onError: () => setUploadError("Editor へセットできませんでした。通信状態を確認してください。"),
   });
 
-  const clearSource = useMutation({
-    mutationFn: () => api.clearEditorSource({}),
+  // Detach the img2img source image (the source area's ×).
+  // The mode toggle is NOT reset: the area stays on whichever
+  // side the user selected, empty, as the upload target.
+  const clearSourceImage = useMutation({
+    mutationFn: () => api.clearSourceImage({}),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
-      // Removing the image returns generation to txt2img-only:
-      // the mode toggle loses its i2i/inpaint side, so its state
-      // is reset to the txt2img side as well.
-      markSettingsImmediate();
-      setImg2imgChecked(false);
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
     },
-    onError: () => setUploadError("元イメージを外せませんでした。通信状態を確認してください。"),
+    onError: () => setUploadError("元画像を外せませんでした。通信状態を確認してください。"),
   });
 
-  // Per-call success callback for USER image selections: once
-  // the tapped image is actually set as the Editor source, the
-  // generation mode switches to the i2i/inpaint side (img2img
-  // vs inpaint follows the mask, as always). A failed set
-  // (res.ok false) leaves the toggle untouched.
-  const selectSwitchesMode = {
-    onSuccess: (res: { ok: boolean }) => {
-      if (res.ok) switchToI2iSide();
+  // 元画像に採用 (the image area's adopt button): copy the image
+  // area's current image into the source slot AND switch the
+  // mode toggle to the img2img side — the one automatic mode
+  // switch in the app, because it is the button's own action.
+  const adoptSource = useMutation({
+    mutationFn: () => api.adoptEditorSource({}),
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
+      if (!res.ok) {
+        setUploadError(res.error ?? "元画像に採用できませんでした。");
+      } else {
+        switchToI2iSide();
+      }
     },
-  };
+    onError: () => setUploadError("元画像に採用できませんでした。通信状態を確認してください。"),
+  });
 
   // 「Editorへ転送」 (history detail): make the job's generated image
   // the Editor's current image (server-side slot) and switch to
   // the Editor pane. As a user image-list selection, a successful
-  // transfer also switches the generation mode to the i2i/inpaint
-  // side.
+  // transfer changes the image area's image only — the mode
+  // toggle and the img2img source slot are untouched.
   function transferToEditor(job: Job) {
     setUploadError(null);
-    setSourceFromJob.mutate({ jobId: job.id }, selectSwitchesMode);
+    setSourceFromJob.mutate({ jobId: job.id });
     switchTab("editor");
   }
 
   // History-panel preview tap (Editor pane): the same editor_source
   // setting as 「Editorへ転送」 — the tapped image becomes the
-  // Editor's current image (and with it the Inpaint target), with
-  // the slot replacement's usual side effects (the painted mask
-  // resets when the source changes to a different pixel size; a
-  // same-size source keeps it) — but WITHOUT moving panes:
-  // the user stays in the Editor, and tapping the image body
-  // itself remains the route into Inpaint. As a user image-list
-  // tap, it also switches the mode to the i2i/inpaint side.
+  // Editor's current image — but WITHOUT moving panes: the user
+  // stays in the Editor, and tapping the image body itself
+  // remains the route into the Preview pane. Neither the mode
+  // toggle nor the img2img source slot changes.
   function setSourceFromPreview(job: Job) {
     setUploadError(null);
-    setSourceFromJob.mutate({ jobId: job.id }, selectSwitchesMode);
+    setSourceFromJob.mutate({ jobId: job.id });
   }
 
   // Upload-library selection (History 「アップロード」 tab detail
   // and the Editor side preview column): the same editor_source
   // setting as the history transfer — the tapped upload becomes
-  // the Editor's current image — and, like every user image-list
-  // selection, it switches the mode to the i2i/inpaint side.
+  // the Editor's current image. The mode toggle and the img2img
+  // source slot are untouched.
   function setSourceFromUploadPreview(upload: UploadImage) {
     setUploadError(null);
-    setSourceFromUpload.mutate({ uploadId: upload.id }, selectSwitchesMode);
+    setSourceFromUpload.mutate({ uploadId: upload.id });
   }
 
   function transferUploadToEditor(upload: UploadImage) {
     setUploadError(null);
-    setSourceFromUpload.mutate({ uploadId: upload.id }, selectSwitchesMode);
+    setSourceFromUpload.mutate({ uploadId: upload.id });
     switchTab("editor");
   }
 
@@ -1569,6 +1606,7 @@ export function App() {
     scheduler,
     img2imgChecked,
     denoisingStrength: editorDenoise,
+    resizeMode,
     maskMode,
     maskBlur,
     brushSize,
@@ -1681,6 +1719,7 @@ export function App() {
         scheduler,
         img2imgChecked,
         denoisingStrength: editorDenoise,
+    resizeMode,
         maskMode,
         maskBlur,
         brushSize,
@@ -1703,6 +1742,7 @@ export function App() {
     setScheduler(nextSettings.scheduler);
     setImg2imgChecked(nextSettings.img2imgChecked);
     setEditorDenoise(nextSettings.denoisingStrength);
+    setResizeMode(nextSettings.resizeMode);
     setMaskMode(nextSettings.maskMode);
     setMaskBlur(nextSettings.maskBlur);
     setBrushSize(nextSettings.brushSize);
@@ -1849,6 +1889,9 @@ export function App() {
   const [editorBox, setEditorBox] = useState<{ w: number; h: number } | null>(null);
   const editorBoxRef = useRef<HTMLDivElement | null>(null);
   const editorMaskDisplayRef = useRef<HTMLCanvasElement | null>(null);
+  // The same mask mirror for the prompt row's source image area
+  // (drawn by the same effect as the Editor image area's).
+  const sourceMaskDisplayRef = useRef<HTMLCanvasElement | null>(null);
 
   const editorSourceIdentity =
     editorSource.kind === "job"
@@ -1856,18 +1899,24 @@ export function App() {
       : editorSource.kind === "upload"
         ? `upload:${editorSource.uploadId ?? editorSource.fileName ?? ""}:${editorSource.byteSize ?? ""}`
         : "none";
+  const sourceIdentity =
+    sourceImage.kind === "job"
+      ? `job:${sourceImage.jobId}`
+      : sourceImage.kind === "upload"
+        ? `upload:${sourceImage.uploadId ?? sourceImage.fileName ?? ""}:${sourceImage.byteSize ?? ""}`
+        : "none";
   const maskSourceRef = useRef<string | null>(null);
   useEffect(() => {
-    if (maskSourceRef.current === editorSourceIdentity) return;
-    maskSourceRef.current = editorSourceIdentity;
+    if (maskSourceRef.current === sourceIdentity) return;
+    maskSourceRef.current = sourceIdentity;
     maskDrawingRef.current = false;
     maskLastPointRef.current = null;
     // Size the mask from the ORIGINAL-resolution image: displayUrl
     // can be the resized display JPEG (max 1280px), whose pixel
     // size is NOT the init image's — the mask must match the init
     // image's real dimensions exactly.
-    const sizingUrl = editorSource.imageUrl ?? editorSource.displayUrl;
-    if (editorSource.kind === "none" || !sizingUrl) {
+    const sizingUrl = sourceImage.imageUrl ?? sourceImage.displayUrl;
+    if (sourceImage.kind === "none" || !sizingUrl) {
       maskCanvasRef.current = null;
       setMaskNatural(null);
       setMaskPainted(false);
@@ -1903,7 +1952,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [editorSourceIdentity, editorSource.kind, editorSource.imageUrl, editorSource.displayUrl]);
+  }, [sourceIdentity, sourceImage.kind, sourceImage.imageUrl, sourceImage.displayUrl]);
 
   // Measure the Inpaint image area so the mask canvas can be laid
   // exactly over the image's drawn rectangle (letterboxing
@@ -1955,21 +2004,24 @@ export function App() {
   }, [tab]);
 
   // Mirror the offscreen mask onto the Editor pane's display-only
-  // canvas whenever the Editor (re)mounts, the mask is (re)created,
+  // canvases (the image area's and the source image area's)
+  // whenever the Editor (re)mounts, the mask is (re)created,
   // or the painted state flips (painting itself happens only in
   // the Inpaint pane, so returning here is what refreshes it).
   useEffect(() => {
     if (tab !== "editor") return;
-    const disp = editorMaskDisplayRef.current;
     const src = maskCanvasRef.current;
-    if (!disp || !src) return;
-    if (disp.width !== src.width) disp.width = src.width;
-    if (disp.height !== src.height) disp.height = src.height;
-    const ctx = disp.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, disp.width, disp.height);
-    ctx.drawImage(src, 0, 0);
-  }, [tab, maskNatural, editorBox, maskPainted]);
+    if (!src) return;
+    for (const disp of [editorMaskDisplayRef.current, sourceMaskDisplayRef.current]) {
+      if (!disp) continue;
+      if (disp.width !== src.width) disp.width = src.width;
+      if (disp.height !== src.height) disp.height = src.height;
+      const ctx = disp.getContext("2d");
+      if (!ctx) continue;
+      ctx.clearRect(0, 0, disp.width, disp.height);
+      ctx.drawImage(src, 0, 0);
+    }
+  }, [tab, maskNatural, editorBox, maskPainted, img2imgChecked]);
 
   function syncMaskDisplay() {
     const disp = maskDisplayRef.current;
@@ -2857,9 +2909,7 @@ export function App() {
         variables.includes(editorSource.jobId)
       ) {
         // The job the Editor was showing is gone: the image is
-        // unset, so the mode toggle returns to the txt2img side.
-        markSettingsImmediate();
-        setImg2imgChecked(false);
+        // unset. The mode toggle is left as the user set it.
       }
       if (!res.ok) {
         setDeleteError("削除できませんでした。");
@@ -2992,20 +3042,18 @@ export function App() {
         setSelectedId(null);
       }
       if (vars.next != null) {
-        // Automatic load (no selectSwitchesMode callback): the
-        // mode toggle keeps its side. The next image in the
-        // merged list may be an upload — it is set through the
-        // upload route just the same.
+        // Automatic load: the mode toggle keeps its side, as
+        // always. The next image in the merged list may be an
+        // upload — it is set through the upload route just the
+        // same.
         if (vars.next.kind === "job") {
           setSourceFromJob.mutate({ jobId: vars.next.jobId });
         } else {
           setSourceFromUpload.mutate({ uploadId: vars.next.uploadId });
         }
-      } else {
-        // No image remains: back to txt2img-only.
-        markSettingsImmediate();
-        setImg2imgChecked(false);
       }
+      // No image remains: the Editor simply shows nothing; the
+      // mode toggle is left as the user set it.
     },
     onError: (error) => {
       setUploadError(
@@ -3067,11 +3115,9 @@ export function App() {
         } else {
           setSourceFromUpload.mutate({ uploadId: vars.next.uploadId });
         }
-      } else {
-        // No image remains: back to txt2img-only.
-        markSettingsImmediate();
-        setImg2imgChecked(false);
       }
+      // No image remains: the Editor simply shows nothing; the
+      // mode toggle is left as the user set it.
     },
     onError: (error) => {
       setUploadError(
@@ -3252,10 +3298,9 @@ export function App() {
         editorSource.kind === "upload" &&
         editorSource.uploadId === variables
       ) {
-        // The Editor's current image is gone: back to
-        // txt2img-only (the server cleared the slot as well).
-        markSettingsImmediate();
-        setImg2imgChecked(false);
+        // The Editor's current image is gone (the server
+        // cleared the slot as well). The mode toggle is left
+        // as the user set it.
       }
     },
     onError: (error) => {
@@ -3373,27 +3418,29 @@ export function App() {
     //   from the Inpaint pane with an unpainted mask is img2img,
     //   NOT an error (the old "マスクが塗られていません" error
     //   stays abolished).
-    // The init image is whatever the shared source slot holds — a
-    // transferred history job (id only), the uploaded image
-    // (initSource "upload"), or the latest completed generation.
+    // The init image is whatever the SOURCE slot holds — a job
+    // image adopted from the image area (id only) or an image
+    // uploaded into the source area (initSource "upload"). The
+    // Editor slot's image plays no part here.
     let i2i: {
       mode: "txt2img" | "img2img";
       sourceJobId: number | null;
       initSource: "job" | "upload" | null;
       denoisingStrength: number | null;
+      resizeMode: number | null;
       maskDataBase64?: string;
       maskBlur?: number | null;
       maskInvert?: number | null;
-    } = { mode: "txt2img", sourceJobId: null, initSource: null, denoisingStrength: null };
+    } = { mode: "txt2img", sourceJobId: null, initSource: null, denoisingStrength: null, resizeMode: null };
     // Whether this run uses the source image at all. The Inpaint
     // pane always does (its whole context is the target image);
     // the Editor follows the toggle.
     const useSourceImage =
-      editorSource.kind !== "none" && (img2imgChecked || tab === "inpaint");
-    if (editorSource.kind === "none") {
+      sourceImage.kind !== "none" && (img2imgChecked || tab === "inpaint");
+    if (sourceImage.kind === "none") {
       if (tab === "inpaint") {
         setFormError(
-          "元イメージがセットされていません。履歴の生成結果の詳細から「Editorへ転送」を押すか、Editor で画像をアップロードしてください。",
+          "元画像がセットされていません。元画像エリアで画像をアップロードするか、画像エリアの「元画像に採用」で表示中の画像を元画像にしてください。",
         );
         return null;
       }
@@ -3415,9 +3462,10 @@ export function App() {
       }
       i2i = {
         mode: "img2img",
-        sourceJobId: editorSource.kind === "job" ? editorSource.jobId : null,
-        initSource: editorSource.kind === "job" ? "job" : "upload",
+        sourceJobId: sourceImage.kind === "job" ? sourceImage.jobId : null,
+        initSource: sourceImage.kind === "job" ? "job" : "upload",
         denoisingStrength: dn,
+        resizeMode,
       };
       if (maskHasPaint()) {
         const maskDataBase64 = exportMaskBase64();
@@ -3430,6 +3478,9 @@ export function App() {
           Number.isInteger(blurRaw) && blurRaw >= 0 && blurRaw <= 16 ? blurRaw : 0;
         i2i = {
           ...i2i,
+          // Inpaint keeps its fixed crop resize server-side; the
+          // panel's resize selector applies to plain img2img only.
+          resizeMode: null,
           maskDataBase64,
           maskBlur: blur,
           // inside (塗った範囲を変更, the former "masked") → 0,
@@ -3736,17 +3787,13 @@ export function App() {
   //   pane. The mask layer is composited over the image here too
   //   (display only — painting stays in the Inpaint pane), laid
   //   over the image's drawn rectangle exactly like Inpaint's.
-  //   The round × button at the top-right stops propagation and
-  //   clears the slot via clearEditorSource — clearing the image
-  //   also returns the mode toggle to txt2img-only. While the
-  //   mode toggle is on the i2i/inpaint side the whole area is
-  //   framed with a thick border (the img2img-family active
-  //   signal); on the txt2img side — even with an image set —
-  //   there is no frame. The × renders only while an image is
-  //   set, positioned against the area's frame (not the image's
-  //   drawn rectangle). Inpaint's own display further below has
-  //   no ×. The mode toggle itself sits directly under this area
-  //   (see editorModeToggle below).
+  //   While the mode toggle is on the i2i/inpaint side and an
+  //   image is set, the whole area is framed with a thick
+  //   border (the img2img-family active signal); on the txt2img
+  //   side — even with an image set — there is no frame. The
+  //   area carries NO clear (×) button and NO upload tap:
+  //   detaching and uploading live on the prompt row's source
+  //   image area. A tap here only opens the Preview pane.
   // - the image's name plate sits FLUSH against the area's
   //   TOP-LEFT corner (no gap), on a 70%-white translucent
   //   background, in an xxs font, on TWO lines: line 1 is the
@@ -3777,7 +3824,7 @@ export function App() {
   //   record + blobs + host file — via deleteUploadImage, and
   //   either way the next merged-list image loads afterwards).
   //   All stop propagation so their taps never fall through to
-  //   the Inpaint route. (A legacy single-slot upload with no
+  //   the Preview route. (A legacy single-slot upload with no
   //   library record gets the download button only — it has no
   //   record to save from or delete.)
   const editorHasImage = editorSource.kind !== "none" && !!editorSource.displayUrl;
@@ -3857,18 +3904,312 @@ export function App() {
       return;
     }
     if (editorHasImage) {
-      switchTab("inpaint");
-    } else {
-      editorFileInputRef.current?.click();
+      switchTab("preview");
     }
   };
+  // 元画像に採用 (adopt as the img2img source): copies the image
+  // area's current image into the source slot and switches the
+  // mode to img2img (the adopt mutation does both). Shown only
+  // in the Editor image area, left of the download button.
+  const adoptSourceButton = (
+    <button
+      type="button"
+      aria-label="元画像に採用"
+      disabled={adoptSource.isPending}
+      onClick={(e) => {
+        e.stopPropagation();
+        adoptSource.mutate();
+      }}
+      className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
+      style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
+    >
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </svg>
+    </button>
+  );
+
+  // The image area's bottom-right button trio (download / save /
+  // delete), shared by the Editor image area and the Preview
+  // pane. The Editor passes its adopt button （元画像に採用） as
+  // the leading element, left of download; the Preview passes
+  // nothing. Self-gating: renders only for a job image or an
+  // upload source (a legacy single-slot upload gets the
+  // download button only, having no record to save or delete).
+  const renderEditorImageButtons = (leading?: ReactNode) => (
+  ((editorSource.kind === "job" && editorSource.jobId != null) ||
+    editorSource.kind === "upload") && (
+    <div className="absolute bottom-2 right-2 z-10 flex gap-2">
+      {leading}
+      {editorSource.imageUrl && (
+        <DownloadButton
+          url={editorSource.imageUrl}
+          fileName={
+            editorSource.kind === "job"
+              ? `${editorSource.jobId}-${editorSource.resultSeed ?? "x"}.png`
+              : editorImageName
+          }
+          ariaLabel="画像をダウンロード"
+          stopPropagation
+          onSettled={reconcileAfterDownload}
+          className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
+          style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
+        >
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 4v11" />
+            <path d="M7 11l5 5 5-5" />
+            <path d="M4 20h16" />
+          </svg>
+        </DownloadButton>
+      )}
+      {((editorSource.kind === "job" && editorSource.jobId != null) ||
+        (editorSource.kind === "upload" &&
+          editorSource.uploadId != null)) && (
+        <>
+          <button
+            type="button"
+            aria-label="画像を保存"
+            disabled={saveImage.isPending || saveUpload.isPending}
+            onClick={(e) => {
+              e.stopPropagation();
+              setSaveNotice(null);
+              setSaveError(null);
+              if (editorSource.kind === "job" && editorSource.jobId != null) {
+                saveImage.mutate(editorSource.jobId);
+              } else if (
+                editorSource.kind === "upload" &&
+                editorSource.uploadId != null
+              ) {
+                saveUpload.mutate(editorSource.uploadId);
+              }
+            }}
+            className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
+            style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+              <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+              <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="この画像を削除"
+            onClick={(e) => {
+              e.stopPropagation();
+              setUploadError(null);
+              setShowEditorDeleteConfirm(true);
+            }}
+            className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)]"
+            style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 7h16" />
+              <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              <path d="M6.5 7l.8 12.2A1 1 0 0 0 8.3 20h7.4a1 1 0 0 0 1-0.8L17.5 7" />
+              <path d="M10 11v5" />
+              <path d="M14 11v5" />
+            </svg>
+          </button>
+        </>
+      )}
+    </div>
+  )
+  );
+
+  // --- Preview pane ---
+  // The Preview pane shows the same editor-source image as the
+  // Editor, full-screen like the Inpaint pane. The position of
+  // the shown image within the merged list (newest first — the
+  // Editor side column's order, and the pane's own thumbnail
+  // strip's: left = newest) drives the left/right eighth-tap
+  // navigation: a tap in the image's left eighth moves to the
+  // item on its left in the list, the right eighth to its right.
+  const previewIndex = mergedPreview.findIndex((item) =>
+    item.kind === "job"
+      ? editorSource.kind === "job" && editorSource.jobId === item.job.id
+      : editorSource.kind === "upload" &&
+        editorSource.uploadId != null &&
+        editorSource.uploadId === item.upload.id,
+  );
+  // Preview navigation is a plain Editor-slot change: like
+  // every image selection it never switches the generation
+  // mode toggle (the pane is a viewer; the mode stays the
+  // Editor's concern), so it calls the bare mutations.
+  function goToPreviewItem(item: MergedPreviewItem) {
+    setUploadError(null);
+    if (item.kind === "job") {
+      setSourceFromJob.mutate({ jobId: item.job.id });
+    } else {
+      setSourceFromUpload.mutate({ uploadId: item.upload.id });
+    }
+  }
+  const previewStripRef = useRef<HTMLDivElement | null>(null);
+  // Keep the strip's current thumbnail in view as the preview
+  // moves (eighth-tap navigation, thumbnail taps, delete-next
+  // loads).
+  useEffect(() => {
+    if (tab !== "preview") return;
+    previewStripRef.current
+      ?.querySelector('[data-current="true"]')
+      ?.scrollIntoView({ inline: "center", block: "nearest" });
+  }, [tab, previewIndex, editorSourceIdentity]);
+  // The pane has nothing to show once the source is gone (the
+  // last image deleted, or the slot cleared elsewhere): fall
+  // back to the Editor hub.
+  useEffect(() => {
+    if (tab === "preview" && editorSource.kind === "none") {
+      setTab("editor");
+    }
+  }, [tab, editorSource.kind]);
+
+  // --- Source image area (Editor, img2img side only) ---
+  // The right half of the prompt row while the mode toggle is on
+  // the img2img(inpaint) side: shows the conversion source (the
+  // shared editor slot image) with the painted mask laid over
+  // it. The mask canvas is a replaced element, so object-fit:
+  // contain letterboxes its bitmap exactly like the image under
+  // it (the mask bitmap shares the image's natural size) — no
+  // measured rect needed here. Tapping the image opens the
+  // Inpaint pane; with no image set, tapping opens the file
+  // picker (this area is the Editor's only upload entry point).
+  // The round × at the top-right detaches the source image; the
+  // mode stays on the img2img side, so the area remains as the
+  // upload target.
+  const sourceImageArea = (
+    <div
+      className="relative min-h-0 min-w-0 border border-[var(--border)] bg-[var(--surface-alt)]"
+      aria-label="元画像エリア"
+    >
+      {sourceImage.kind !== "none" && sourceImage.displayUrl ? (
+        <>
+          <img
+            src={sourceImage.displayUrl}
+            alt="変換元画像"
+            className="absolute inset-0 h-full w-full object-contain"
+          />
+          {maskNatural && (
+            <canvas
+              ref={sourceMaskDisplayRef}
+              aria-hidden="true"
+              width={maskNatural.w}
+              height={maskNatural.h}
+              className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+              style={{ opacity: 0.5 }}
+            />
+          )}
+          <button
+            type="button"
+            aria-label="Inpaintペインへ移動"
+            onClick={() => switchTab("inpaint")}
+            className="absolute inset-0 cursor-pointer bg-transparent"
+            style={{ minHeight: 0 }}
+          />
+          <button
+            type="button"
+            aria-label="元画像を外す"
+            onClick={(e) => {
+              e.stopPropagation();
+              clearSourceImage.mutate();
+            }}
+            className="absolute right-1 top-1 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
+            style={{ width: "2rem", height: "2rem", minHeight: "2rem" }}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M6 6l12 12" />
+              <path d="M18 6L6 18" />
+            </svg>
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="px-2 text-center text-xs text-[var(--dim)]">
+              {uploadImage.isPending
+                ? "アップロード中…"
+                : "元画像がありません。タップでアップロードできます。"}
+            </span>
+          </div>
+          <button
+            type="button"
+            aria-label="元画像をアップロード"
+            onClick={() => editorFileInputRef.current?.click()}
+            className="absolute inset-0 cursor-pointer bg-transparent"
+            style={{ minHeight: 0 }}
+          />
+        </>
+      )}
+      {uploadError && (
+        <p
+          role="alert"
+          className="absolute bottom-1 left-1 right-1 border border-[var(--err)] bg-[var(--surface)] px-2 py-1 text-xs text-[var(--err)]"
+        >
+          {uploadError}
+        </p>
+      )}
+    </div>
+  );
+
   const sharedImageDisplay = (
     <div
       ref={editorBoxRef}
       className="relative min-h-0 min-w-0 flex-1"
       style={{
         border:
-          editorHasImage && img2imgChecked
+          editorHasImage &&
+          img2imgChecked &&
+          editorSourceIdentity === sourceIdentity
             ? "4px solid var(--accent)"
             : "4px solid transparent",
       }}
@@ -3884,12 +4225,14 @@ export function App() {
           </div>
           <button
             type="button"
-            aria-label="Inpaintへ移動"
+            aria-label="プレビューを開く"
             onClick={onEditorAreaTap}
             className="absolute inset-0 cursor-pointer bg-transparent"
             style={{ minHeight: 0 }}
           />
-          {editorMaskRect && maskNatural && (
+          {editorMaskRect &&
+            maskNatural &&
+            editorSourceIdentity === sourceIdentity && (
             <canvas
               ref={editorMaskDisplayRef}
               data-editor-mask-canvas="true"
@@ -3906,161 +4249,20 @@ export function App() {
               }}
             />
           )}
-          <button
-            type="button"
-            aria-label="この画像を外す"
-            onClick={(e) => {
-              e.stopPropagation();
-              clearSource.mutate();
-            }}
-            className="absolute right-2 top-2 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
-            style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              aria-hidden="true"
-            >
-              <path d="M6 6l12 12" />
-              <path d="M18 6L6 18" />
-            </svg>
-          </button>
           {imageNamePlate("left-0")}
-          {((editorSource.kind === "job" && editorSource.jobId != null) ||
-            editorSource.kind === "upload") && (
-            <div className="absolute bottom-2 right-2 flex gap-2">
-              {editorSource.imageUrl && (
-                <DownloadButton
-                  url={editorSource.imageUrl}
-                  fileName={
-                    editorSource.kind === "job"
-                      ? `${editorSource.jobId}-${editorSource.resultSeed ?? "x"}.png`
-                      : editorImageName
-                  }
-                  ariaLabel="画像をダウンロード"
-                  stopPropagation
-                  onSettled={reconcileAfterDownload}
-                  className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
-                  style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
-                >
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M12 4v11" />
-                    <path d="M7 11l5 5 5-5" />
-                    <path d="M4 20h16" />
-                  </svg>
-                </DownloadButton>
-              )}
-              {((editorSource.kind === "job" && editorSource.jobId != null) ||
-                (editorSource.kind === "upload" &&
-                  editorSource.uploadId != null)) && (
-                <>
-                  <button
-                    type="button"
-                    aria-label="画像を保存"
-                    disabled={saveImage.isPending || saveUpload.isPending}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSaveNotice(null);
-                      setSaveError(null);
-                      if (editorSource.kind === "job" && editorSource.jobId != null) {
-                        saveImage.mutate(editorSource.jobId);
-                      } else if (
-                        editorSource.kind === "upload" &&
-                        editorSource.uploadId != null
-                      ) {
-                        saveUpload.mutate(editorSource.uploadId);
-                      }
-                    }}
-                    className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
-                    style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
-                  >
-                    <svg
-                      width="18"
-                      height="18"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
-                      <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
-                      <path d="M7 3v4a1 1 0 0 0 1 1h7" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="この画像を削除"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setUploadError(null);
-                      setShowEditorDeleteConfirm(true);
-                    }}
-                    className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)]"
-                    style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
-                  >
-                    <svg
-                      width="18"
-                      height="18"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M4 7h16" />
-                      <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                      <path d="M6.5 7l.8 12.2A1 1 0 0 0 8.3 20h7.4a1 1 0 0 0 1-0.8L17.5 7" />
-                      <path d="M10 11v5" />
-                      <path d="M14 11v5" />
-                    </svg>
-                  </button>
-                </>
-              )}
-            </div>
-          )}
+          {renderEditorImageButtons(adoptSourceButton)}
         </>
       ) : (
-        <>
-          <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
-            <span className="px-4 text-center text-sm text-[var(--dim)]">
-              {uploadImage.isPending
-                ? "アップロード中…"
-                : "画像はまだありません。タップで画像をアップロードできます。生成結果や履歴からの転送でも表示されます。"}
-            </span>
-          </div>
-          <button
-            type="button"
-            aria-label="画像を選択"
-            onClick={onEditorAreaTap}
-            className="absolute inset-0 cursor-pointer bg-transparent"
-            style={{ minHeight: 0 }}
-          />
-        </>
+        <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+          <span className="px-4 text-center text-sm text-[var(--dim)]">
+            画像はまだありません。生成結果や履歴からの転送で表示されます。
+          </span>
+        </div>
       )}
       {(saveNotice || saveError) && tab === "editor" && (
         <p
           role={saveError ? "alert" : "status"}
-          className="absolute bottom-2 left-2 max-w-[calc(100%-9rem)] border bg-[var(--surface)] px-3 py-2 text-sm"
+          className="absolute bottom-2 left-2 max-w-[calc(100%-12rem)] border bg-[var(--surface)] px-3 py-2 text-sm"
           style={{
             borderColor: saveError ? "var(--err)" : "var(--ok)",
             color: saveError ? "var(--err)" : "var(--ok)",
@@ -4069,74 +4271,38 @@ export function App() {
           {saveError ?? saveNotice}
         </p>
       )}
-      {uploadError && tab === "editor" && (
-        <p
-          role="alert"
-          className="absolute bottom-2 left-2 right-2 border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
-        >
-          {uploadError}
-        </p>
-      )}
     </div>
   );
 
-  // --- Editor mode toggle ---
-  // ONE wide button rendered directly under the Editor image
-  // area (in the image column, above the parameter panel). Its
-  // label is swapped to name the EFFECTIVE generation mode at
-  // all times:
-  // - no image set: txt2img only — the button shows "txt2img"
-  //   and is disabled (nothing to switch).
-  // - image set: a tap flips between the txt2img side and the
-  //   i2i/inpaint side (img2imgChecked). The i2i-side label
-  //   follows the mask automatically — "inpaint" while the mask
-  //   has paint, "img2img" otherwise — because the mask alone
-  //   splits those two (see buildJobArgs). The i2i side is shown
-  //   in the accent fill (the active-family signal, matching the
-  //   image area's thick frame); the txt2img side stays plain.
-  // Automatic switches to the i2i/inpaint side: uploading, and
-  // a user image-list selection (preview-column tap / History
-  // pane set). A completed generation's auto-set and the
-  // delete-next load never move this toggle, and clearing the
-  // image returns it to txt2img-only.
-  const editorOnI2iSide = editorHasImage && img2imgChecked;
-  const editorEffectiveMode = editorOnI2iSide
+  // --- Editor generation mode ---
+  // The operation panel's mode cell is a TOGGLE between the
+  // txt2img side and the img2img(inpaint) side (img2imgChecked).
+  // Its label names the selected side: "txt2img", or on the i2i
+  // side "inpaint" while the mask has paint and "img2img"
+  // otherwise — the mask alone splits those two (see
+  // buildJobArgs). The toggle is enabled with no image set:
+  // switching to the i2i side reveals the source image area in
+  // the prompt row, whose tap uploads the source. Generation
+  // itself still falls back to txt2img while no source image is
+  // set. The i2i side is shown in the accent fill (the
+  // active-family signal, matching the image area's thick frame
+  // while a source image is set); the txt2img side stays plain.
+  // Automatic switches to the i2i side: uploading, and a user
+  // image-list selection (preview-column tap / History pane
+  // set). A completed generation's auto-set and the delete-next
+  // load never move this.
+  const modeSideLabel = img2imgChecked
     ? maskPainted
       ? "inpaint"
       : "img2img"
     : "txt2img";
-  const editorModeToggle = (
-    <div
-      className="flex shrink-0 items-stretch border-t border-[var(--border)] bg-[var(--surface)]"
-      style={{ height: "2.25rem" }}
-    >
-      <button
-        type="button"
-        aria-label={`生成モードを切り替え（現在: ${editorEffectiveMode}）`}
-        aria-pressed={editorOnI2iSide}
-        disabled={!editorHasImage}
-        onClick={() => {
-          markSettingsImmediate();
-          setImg2imgChecked(!img2imgChecked);
-        }}
-        className={`flex-1 px-2 text-center text-sm font-semibold ${MONO} disabled:opacity-60 ${editorOnI2iSide ? "" : "bg-[var(--surface)]"}`}
-        style={{
-          minHeight: "2.25rem",
-          ...(editorOnI2iSide
-            ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
-            : {}),
-        }}
-      >
-        {editorEffectiveMode}
-      </button>
-    </div>
-  );
 
-  function toggleEditorPopup(name: "model" | "style" | "denoise" | "blur" | "brush") {
+  function toggleEditorPopup(name: "model" | "style" | "denoise" | "blur" | "brush" | "resize") {
     setEditorPopup((prev) => (prev === name ? null : name));
   }
 
-  // --- Inpaint image display: the same slot image as the Editor
+  // --- Inpaint image display: the SOURCE slot's image (the
+  // img2img source), independent of the Editor slot's image.
   // pane, with the mask canvas laid exactly over the image's drawn
   // rectangle (the object-contain letterbox area). Unlike the
   // Editor display it carries NO clear (×) button, NO mode
@@ -4171,12 +4337,12 @@ export function App() {
 
   const inpaintImageDisplay = (
     <div ref={inpaintBoxRef} className="relative min-h-0 min-w-0 flex-1">
-      {editorSource.kind !== "none" && editorSource.displayUrl ? (
+      {sourceImage.kind !== "none" && sourceImage.displayUrl ? (
         <>
           <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
             <img
-              src={editorSource.displayUrl}
-              alt="現在の画像"
+              src={sourceImage.displayUrl}
+              alt="元画像"
               className="h-full w-full object-contain"
             />
           </div>
@@ -4237,7 +4403,7 @@ export function App() {
           no mask without one), painted above the mask canvas.
           Rendered at 1.5× the standard round-button size (disc
           and glyph), like this pane's back button. */}
-      {editorSource.kind !== "none" && editorSource.displayUrl && (
+      {sourceImage.kind !== "none" && sourceImage.displayUrl && (
         <button
           type="button"
           aria-label="マスクを全削除"
@@ -4369,6 +4535,32 @@ export function App() {
         className="w-full"
       />
     </div>
+  ) : editorPopup === "resize" ? (
+    <div className={popupPanelCls} role="dialog" aria-label="リサイズ方法選択">
+      <div className="flex border border-[var(--border)]" role="group" aria-label="リサイズ方法選択">
+        {RESIZE_MODES.map((r, i) => (
+          <button
+            key={r.value}
+            type="button"
+            aria-pressed={resizeMode === r.value}
+            onClick={() => {
+              markSettingsImmediate();
+              setResizeMode(r.value);
+              setEditorPopup(null);
+            }}
+            className={`flex-1 px-2 py-2 text-sm font-medium ${resizeMode === r.value ? "" : "bg-[var(--surface)]"}`}
+            style={{
+              borderLeft: i > 0 ? "1px solid var(--border)" : undefined,
+              ...(resizeMode === r.value
+                ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                : {}),
+            }}
+          >
+            {r.label}
+          </button>
+        ))}
+      </div>
+    </div>
   ) : editorPopup === "blur" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="ブラー設定">
       <label htmlFor="blur-slider" className="flex items-center justify-between text-sm">
@@ -4469,8 +4661,20 @@ export function App() {
               gridTemplateColumns: "minmax(0, 1fr)",
             }}
           >
-            {/* --- text area: prompt textarea only (1x1) --- */}
-            <div className="min-h-0 px-3 py-1.5">
+            {/* --- text area: prompt textarea (1x1). On the
+                img2img(inpaint) side (and not while the prompt
+                is focused) the row splits in half: the right
+                half is the source image area. --- */}
+            <div
+              className="grid min-h-0 px-3 py-1.5"
+              style={{
+                gridTemplateColumns:
+                  img2imgChecked && !promptFocused
+                    ? "minmax(0, 1fr) minmax(0, 1fr)"
+                    : "minmax(0, 1fr)",
+                gap: img2imgChecked && !promptFocused ? "0.5rem" : undefined,
+              }}
+            >
               <textarea
                 {...FIELDS.createJob.prompt}
                 id="prompt"
@@ -4521,9 +4725,10 @@ export function App() {
                 // Same field styling as inputCls but with narrower
                 // inner padding, so more of the fixed area shows
                 // prompt text (font size and layout are unchanged).
-                className="h-full w-full resize-none border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-base text-[var(--text)]"
+                className="h-full w-full min-w-0 resize-none border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-base text-[var(--text)]"
                 style={{ borderRadius: "var(--radius)" }}
               />
+              {img2imgChecked && !promptFocused && sourceImageArea}
             </div>
 
             {/* --- auxiliary panel (focused only): 3 rows x 6 cols
@@ -4704,11 +4909,10 @@ export function App() {
             {/* --- image row (default view only): split 5:1 into
                 the image display area and the history panel. The
                 display area itself is the control surface (see
-                sharedImageDisplay) — tap opens the file picker
-                while no image is set and switches to Inpaint once
-                one is; the round clear button overlays the area
-                frame, and the mode toggle row sits directly under
-                the image area in the left column. The file input carries
+                sharedImageDisplay) — a tap switches to the
+                Preview pane while an image is set and does
+                nothing otherwise (uploading lives on the prompt
+                row's source image area). The file input carries
                 type="file" ONLY and deliberately NO accept
                 attribute: an accept filter changes which picker
                 UI mobile browsers present.
@@ -4733,7 +4937,6 @@ export function App() {
             >
               <div className="flex min-h-0 min-w-0 flex-col">
                 {sharedImageDisplay}
-                {editorModeToggle}
                 <input
                   ref={editorFileInputRef}
                   id="editor-image"
@@ -4840,41 +5043,90 @@ export function App() {
                     );
                   })}
                 </div>
-                <button
-                  type="button"
-                  aria-label="履歴ペインへ移動"
-                  onClick={() => switchTab("history")}
-                  className="shrink-0 bg-[var(--surface)] px-1 py-2 text-center text-sm font-semibold"
-                  style={{ borderTop: "1px solid var(--border)", minHeight: "2.5rem" }}
-                >
-                  &gt;&gt;&gt;
-                </button>
               </div>
             </div>
             )}
 
-            {/* --- parameter panel (default view only): model /
-                style / denoise popups, plus the その他 column
-                that routes to the Parameter pane --- */}
+            {/* --- operation panel (default view only): 2 rows x
+                4 columns directly above the footer generate row.
+                Top row: mode (txt2img / img2img(inpaint) toggle)
+                / denoise / resize (Cover / Crop / Contain /
+                Latent popup; plain img2img only — inpaint keeps
+                its fixed crop) / list (routes to the History
+                pane). Bottom row: model / style / blank /
+                parameter (routes to the Parameter pane). Popups
+                open upward over the image row, as before. --- */}
             {!promptFocused && (
             <div data-popup-area="true" className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)]">
               {editorPopup != null && editorPopup !== "blur" && editorPopup !== "brush" && (
                 <div className="absolute inset-x-0 bottom-full">{editorPopupContent}</div>
               )}
               <div
-                className="flex items-stretch"
+                className="grid"
                 role="group"
-                aria-label="パラメータパネル"
-                style={{ height: "2.5rem" }}
+                aria-label="操作パネル"
+                style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
               >
+                <button
+                  type="button"
+                  aria-label="生成モード切り替え"
+                  aria-pressed={img2imgChecked}
+                  onClick={() => {
+                    markSettingsImmediate();
+                    setImg2imgChecked(!img2imgChecked);
+                  }}
+                  className={`flex flex-col items-center justify-center px-1 py-0 ${img2imgChecked ? "" : "bg-[var(--surface)]"}`}
+                  style={{
+                    minHeight: "2.5rem",
+                    ...(img2imgChecked
+                      ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                      : {}),
+                  }}
+                >
+                  <span className={`text-[10px] leading-tight ${img2imgChecked ? "" : "text-[var(--dim)]"}`}>モード</span>
+                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{modeSideLabel}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label="デノイズ設定"
+                  aria-haspopup="dialog"
+                  aria-expanded={editorPopup === "denoise"}
+                  onClick={() => toggleEditorPopup("denoise")}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                >
+                  <span className="text-[10px] leading-tight text-[var(--dim)]">デノイズ</span>
+                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{editorDenoise}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label="リサイズ方法選択"
+                  aria-haspopup="dialog"
+                  aria-expanded={editorPopup === "resize"}
+                  onClick={() => toggleEditorPopup("resize")}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                >
+                  <span className="text-[10px] leading-tight text-[var(--dim)]">リサイズ</span>
+                  <span className="text-sm font-semibold leading-tight">{RESIZE_MODES[resizeMode]?.label}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label="リストペインへ移動"
+                  onClick={() => switchTab("history")}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                >
+                  <span className="text-sm font-semibold leading-tight">リスト &gt;</span>
+                </button>
                 <button
                   type="button"
                   aria-label="モデル選択"
                   aria-haspopup="dialog"
                   aria-expanded={editorPopup === "model"}
                   onClick={() => toggleEditorPopup("model")}
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
-                  style={{ minHeight: "2.5rem" }}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  style={{ minHeight: "2.5rem", borderTop: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">モデル</span>
                   <span className={`text-sm font-semibold leading-tight ${MONO}`}>{modelShortLabel(model)}</span>
@@ -4885,33 +5137,24 @@ export function App() {
                   aria-haspopup="dialog"
                   aria-expanded={editorPopup === "style"}
                   onClick={() => toggleEditorPopup("style")}
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
-                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">画風</span>
                   <span className={`text-sm font-semibold leading-tight ${MONO}`}>{`(${photorealisticWeight}, ${comicloWeight})`}</span>
                 </button>
-                <button
-                  type="button"
-                  aria-label="デノイズ設定"
-                  aria-haspopup="dialog"
-                  aria-expanded={editorPopup === "denoise"}
-                  onClick={() => toggleEditorPopup("denoise")}
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
-                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
-                >
-                  <span className="text-[10px] leading-tight text-[var(--dim)]">デノイズ</span>
-                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{editorDenoise}</span>
-                </button>
+                <span
+                  aria-hidden="true"
+                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
+                />
                 <button
                   type="button"
                   aria-label="パラメータペインへ移動"
                   onClick={() => switchTab("parameters")}
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
-                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
                 >
-                  <span className="text-[10px] leading-tight text-[var(--dim)]">その他</span>
-                  <span className="text-sm font-semibold leading-tight">開く</span>
+                  <span className="text-sm font-semibold leading-tight">パラメータ &gt;</span>
                 </button>
               </div>
             </div>
@@ -4927,7 +5170,7 @@ export function App() {
             an inpaint job when the mask has paint, plain img2img
             when it does not — regardless of the Editor mode
             toggle (see buildJobArgs). The image area shows the
-            same slot image as Editor. */}
+            the img2img source image. */}
         {tab === "inpaint" && (
           <section
             aria-label="Inpaint"
@@ -5006,6 +5249,250 @@ export function App() {
                     {penTool === "eraser" ? "消しゴム" : "ペン"}
                   </span>
                 </button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ============ Preview pane: the Editor's current image
+            full-screen (the image display mirrors the Inpaint
+            pane's), over a bottom thumbnail strip instead of the
+            footer generate row (the footer is hidden on this
+            pane). The strip is the merged preview list — outputs
+            and uploads interleaved by time, newest first, left =
+            newest — laid out in one horizontally scrolling row;
+            tapping a thumbnail, or the image's left / right
+            eighth, moves the preview through the list. The name
+            plate (top-left) and the download / save / delete trio
+            (bottom-right) are the Editor image area's own. The
+            round pencil button (bottom-left) is the route into
+            the Inpaint pane with the shown image; the round ×
+            (top-right) closes back to the Editor. ============ */}
+        {tab === "preview" && (
+          <section
+            aria-label="プレビュー"
+            className="relative grid h-full min-h-0 min-w-0"
+            style={{
+              gridTemplateRows: "1fr auto",
+              gridTemplateColumns: "minmax(0, 1fr)",
+            }}
+          >
+            <div className="relative min-h-0 min-w-0">
+              {editorSource.kind !== "none" && editorSource.displayUrl ? (
+                <>
+                  <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+                    <img
+                      src={editorSource.displayUrl}
+                      alt="現在の画像"
+                      className="h-full w-full object-contain"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="左の画像へ移動"
+                    disabled={previewIndex <= 0}
+                    onClick={() => {
+                      const item = mergedPreview[previewIndex - 1];
+                      if (item) goToPreviewItem(item);
+                    }}
+                    className="absolute inset-y-0 left-0 w-[12.5%] cursor-pointer bg-transparent disabled:cursor-default"
+                    style={{ minHeight: 0 }}
+                  />
+                  <button
+                    type="button"
+                    aria-label="右の画像へ移動"
+                    disabled={
+                      previewIndex < 0 ||
+                      previewIndex >= mergedPreview.length - 1
+                    }
+                    onClick={() => {
+                      const item = mergedPreview[previewIndex + 1];
+                      if (item) goToPreviewItem(item);
+                    }}
+                    className="absolute inset-y-0 right-0 w-[12.5%] cursor-pointer bg-transparent disabled:cursor-default"
+                    style={{ minHeight: 0 }}
+                  />
+                  {imageNamePlate("left-0")}
+                  <button
+                    type="button"
+                    aria-label="プレビューを閉じる"
+                    onClick={() => switchTab("editor")}
+                    className="absolute right-2 top-2 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
+                    style={{ width: "3.375rem", height: "3.375rem", minHeight: "3.375rem" }}
+                  >
+                    <svg
+                      width="24"
+                      height="24"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M6 6l12 12" />
+                      <path d="M18 6L6 18" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Inpaintへ移動"
+                    onClick={() => switchTab("inpaint")}
+                    className="absolute bottom-2 left-2 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
+                    style={{ width: "3.375rem", height: "3.375rem", minHeight: "3.375rem" }}
+                  >
+                    <svg
+                      width="24"
+                      height="24"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      <path d="m15 5 4 4" />
+                    </svg>
+                  </button>
+                  {renderEditorImageButtons()}
+                  {(saveNotice || saveError) && (
+                    <p
+                      role={saveError ? "alert" : "status"}
+                      className="absolute bottom-2 max-w-[calc(100%-11rem)] border bg-[var(--surface)] px-3 py-2 text-sm"
+                      style={{
+                        left: "4.5rem",
+                        borderColor: saveError ? "var(--err)" : "var(--ok)",
+                        color: saveError ? "var(--err)" : "var(--ok)",
+                      }}
+                    >
+                      {saveError ?? saveNotice}
+                    </p>
+                  )}
+                  {uploadError && (
+                    <p
+                      role="alert"
+                      className="absolute bottom-2 max-w-[calc(100%-11rem)] border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
+                      style={{ left: "4.5rem" }}
+                    >
+                      {uploadError}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+                  <span className="px-4 text-center text-sm text-[var(--dim)]">
+                    画像はまだありません。Editor で画像を設定してください。
+                  </span>
+                </div>
+              )}
+            </div>
+            <div
+              className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)]"
+              style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+            >
+              <div
+                ref={previewStripRef}
+                className="flex overflow-x-auto"
+                role="group"
+                aria-label="画像一覧"
+                style={{ height: "4.5rem" }}
+              >
+                {mergedPreview.map((item) => {
+                  const current =
+                    (item.kind === "job" &&
+                      editorSource.kind === "job" &&
+                      editorSource.jobId === item.job.id) ||
+                    (item.kind === "upload" &&
+                      editorSource.kind === "upload" &&
+                      editorSource.uploadId != null &&
+                      editorSource.uploadId === item.upload.id);
+                  const thumbCls =
+                    "relative block aspect-square h-full shrink-0 overflow-hidden p-0";
+                  const thumbStyle = {
+                    minHeight: 0,
+                    borderRight: "1px solid var(--border)",
+                    ...(current
+                      ? {
+                          outline: "2px solid var(--accent2)",
+                          outlineOffset: "-2px",
+                        }
+                      : {}),
+                  };
+                  if (item.kind === "upload") {
+                    const u = item.upload;
+                    return (
+                      <button
+                        key={`upload-${u.id}`}
+                        type="button"
+                        data-current={current || undefined}
+                        aria-label={`アップロード画像 ${u.fileName ?? u.storedName} を表示`}
+                        onClick={() => goToPreviewItem(item)}
+                        className={thumbCls}
+                        style={thumbStyle}
+                      >
+                        <img
+                          src={(u.displayUrl ?? u.imageUrl) ?? undefined}
+                          alt=""
+                          className="block h-full w-full object-cover"
+                        />
+                        <span
+                          aria-hidden="true"
+                          className="absolute bottom-1 left-1 flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] px-1 text-[10px] font-semibold leading-tight text-[var(--text)]"
+                          style={{ minHeight: "1rem" }}
+                        >
+                          <svg
+                            width="10"
+                            height="10"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M12 19V5" />
+                            <path d="M5 12l7-7 7 7" />
+                          </svg>
+                          UP
+                        </span>
+                      </button>
+                    );
+                  }
+                  const j = item.job;
+                  return j.canSendToEditor ? (
+                    <button
+                      key={`job-${j.id}`}
+                      type="button"
+                      data-current={current || undefined}
+                      aria-label={`履歴 ${j.id} の画像を表示`}
+                      onClick={() => goToPreviewItem(item)}
+                      className={thumbCls}
+                      style={thumbStyle}
+                    >
+                      <img
+                        src={j.displayUrl ?? undefined}
+                        alt=""
+                        className="block h-full w-full object-cover"
+                      />
+                    </button>
+                  ) : (
+                    <div
+                      key={`job-${j.id}`}
+                      data-current={current || undefined}
+                      className={thumbCls}
+                      style={thumbStyle}
+                    >
+                      <img
+                        src={j.displayUrl ?? undefined}
+                        alt=""
+                        className="block h-full w-full object-cover"
+                      />
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </section>
@@ -5740,7 +6227,9 @@ export function App() {
 
       {/* --- footer generate row (the only fixed bottom row —
           there is no tab bar; shown on every pane except
-          History): generate button (about 2/3, its label doubles
+          History and Preview — the Preview pane's bottom row is
+          its thumbnail strip instead): generate button (about
+          2/3, its label doubles
           as the job status display) + size popup toggle (about
           1/3, labelled with the current dimensions as
           "width×height"; a dot at its top-right corner flags
@@ -5752,7 +6241,7 @@ export function App() {
           the sizePopupOpen state). The row carries the Android
           safe-area bottom padding itself now that it is the
           bottom-most element. --- */}
-      {tab !== "history" && (
+      {tab !== "history" && tab !== "preview" && (
         <div
           className="relative border-t border-[var(--border)] bg-[var(--surface)]"
           style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
