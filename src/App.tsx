@@ -185,6 +185,31 @@ function modelShortLabel(key: string | null): string {
   return MODELS.find((m) => m.key === key)?.shortLabel ?? key ?? "";
 }
 
+// Weight formatting for the composed prompt, mirroring Python's
+// %g (the old server-side composition): integers print without a
+// decimal point, fractions in shortest round-trip form. String(n)
+// matches %g across the weight ranges the form allows.
+function fmtWeight(n: number): string {
+  return String(n);
+}
+
+// Fetch an image URL (the workbench's own /files/ route) and
+// return its raw base64 — the client now carries the img2img init
+// image inside the payload it composes.
+async function fetchImageAsBase64(url: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
+  const blob = await res.blob();
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("image read failed"));
+    reader.readAsDataURL(blob);
+  });
+  const comma = dataUrl.indexOf(",");
+  return comma >= 0 ? dataUrl.slice(comma + 1) : "";
+}
+
 // Base display for history: each tag appears only when its weight
 // is non-zero (baseEnabled abolished in the 2026-11-19 overhaul).
 // Legacy jobs recorded with baseEnabled false and non-zero weights
@@ -2822,7 +2847,7 @@ export function App() {
     // and the label switches to 「生成中...」 on its own.
     mutationFn: async (args: GenerationArgs) => {
       const isInpaint =
-        args.maskDataBase64 != null && args.maskDataBase64 !== "";
+        typeof args.payload.mask === "string" && args.payload.mask !== "";
       let timer: number | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = window.setTimeout(
@@ -3341,7 +3366,7 @@ export function App() {
   // Validates the form and builds the generation arguments for
   // createJob. Returns null after setting the form error when
   // validation fails.
-  function buildJobArgs(): GenerationArgs | null {
+  async function buildJobArgs(): Promise<GenerationArgs | null> {
     // Generate is a prompt-save flush point: back up the current
     // prompt (and extra negative) before the job is created.
     flushPromptSave();
@@ -3428,10 +3453,10 @@ export function App() {
       initSource: "job" | "upload" | null;
       denoisingStrength: number | null;
       resizeMode: number | null;
-      maskDataBase64?: string;
-      maskBlur?: number | null;
-      maskInvert?: number | null;
     } = { mode: "txt2img", sourceJobId: null, initSource: null, denoisingStrength: null, resizeMode: null };
+    // The painted mask, when this run is an inpaint: carried into
+    // the payload below, no longer a record field of its own.
+    let mask: { data: string; blur: number; invert: number } | null = null;
     // Whether this run uses the source image at all. The Inpaint
     // pane always does (its whole context is the target image);
     // the Editor follows the toggle.
@@ -3476,17 +3501,73 @@ export function App() {
         const blurRaw = Number(maskBlur);
         const blur =
           Number.isInteger(blurRaw) && blurRaw >= 0 && blurRaw <= 16 ? blurRaw : 0;
-        i2i = {
-          ...i2i,
-          // Inpaint keeps its fixed crop resize server-side; the
-          // panel's resize selector applies to plain img2img only.
-          resizeMode: null,
-          maskDataBase64,
-          maskBlur: blur,
+        mask = {
+          data: maskDataBase64,
+          blur,
           // inside (塗った範囲を変更, the former "masked") → 0,
           // outside (the former "not masked") → 1.
-          maskInvert: maskMode === "not masked" ? 1 : 0,
+          invert: maskMode === "not masked" ? 1 : 0,
         };
+      }
+    }
+    // Compose the complete sdapi payload here in the client (the
+    // payload-passthrough rework): the worker manages no
+    // parameters at all and hands this object to the WebUI API
+    // verbatim. The style base is folded into the prompt from the
+    // two weights (0 = tag omitted), the negative is the form's
+    // text (empty for zimage), steps / cfg / sampler / scheduler
+    // are the form's values, and the checkpoint comes from the
+    // model's recipe entry in MODELS.
+    const recipe = MODELS.find((m) => m.key === model) ?? MODELS[0]!;
+    const content = prompt.trim();
+    const baseParts: string[] = [];
+    if (pw !== 0) baseParts.push(`(photorealistic: ${fmtWeight(pw)})`);
+    if (cw !== 0) baseParts.push(`<lora:comiclo-xl-pony:${fmtWeight(cw)}>`);
+    const fullPrompt =
+      baseParts.length > 0
+        ? content
+          ? `${baseParts.join(", ")}, ${content}`
+          : baseParts.join(", ")
+        : content;
+    const payload: Record<string, unknown> = {
+      prompt: fullPrompt,
+      negative_prompt: model === "zimage" ? "" : negativePrompt,
+      width: w,
+      height: h,
+      steps: st,
+      cfg_scale: cf,
+      sampler_name: sampler,
+      scheduler,
+      seed: seedArg.seed ?? -1,
+      override_settings: { sd_model_checkpoint: recipe.checkpoint },
+      override_settings_restore_afterwards: true,
+    };
+    if (i2i.mode === "img2img") {
+      const srcUrl = sourceImage.imageUrl ?? sourceImage.displayUrl;
+      if (!srcUrl) {
+        setFormError("元画像を読み込めませんでした。");
+        return null;
+      }
+      let initB64: string;
+      try {
+        initB64 = await fetchImageAsBase64(srcUrl);
+      } catch {
+        setFormError("元画像を読み込めませんでした。通信状態を確認してください。");
+        return null;
+      }
+      payload.init_images = [initB64];
+      payload.denoising_strength = i2i.denoisingStrength;
+      // The panel's resize selection now applies to inpaint too —
+      // nothing is fixed on the worker side anymore.
+      payload.resize_mode = resizeMode;
+      payload.include_init_images = false;
+      if (mask) {
+        payload.mask = mask.data;
+        payload.mask_blur = mask.blur;
+        payload.inpainting_mask_invert = mask.invert;
+        payload.inpainting_fill = 1;
+        payload.inpaint_full_res = false;
+        payload.inpaint_full_res_padding = 32;
       }
     }
     return {
@@ -3505,11 +3586,12 @@ export function App() {
       comicloWeight: cw,
       ...seedArg,
       ...i2i,
+      payload,
     };
   }
 
-  function submit() {
-    const args = buildJobArgs();
+  async function submit() {
+    const args = await buildJobArgs();
     if (args) createJob.mutate(args);
   }
 

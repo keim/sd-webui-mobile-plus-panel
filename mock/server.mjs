@@ -237,16 +237,9 @@ function learnPromptWords(dictionary, prompt) {
 }
 
 // --- simulated generation --------------------------------------------------
-const MINOR_TAGS = ["loli", "child", "shota", "minor", "underage"];
-function guardrailError(prompt) {
-  const words = new Set(splitPromptWords(prompt));
-  for (const tag of MINOR_TAGS) {
-    if (words.has(tag)) {
-      return `guardrail: prompt contains a blocked tag (${tag})`;
-    }
-  }
-  return null;
-}
+// Payload passthrough mirrors production: createJob stores the
+// client's payload untouched and the completion records it (image
+// blobs elided) as usedParams. No composition, no guardrails.
 
 // Advance running jobs whose simulated time has elapsed. Called from
 // the read paths so no timers are involved.
@@ -275,18 +268,20 @@ async function tick() {
     await copyFixtureTo(`${sample}.display.jpg`, job.displayKey);
     job.resultSeed =
       job.seedInput ?? Math.floor(Math.random() * 4294967295);
+    const p = job.payload ?? {};
+    const elide = (v) =>
+      typeof v === "string" ? { bytes: Math.floor((v.length * 3) / 4) } : v;
     job.usedParams = JSON.stringify({
-      prompt: job.prompt, negative_prompt: job.negativePrompt,
-      steps: MODEL_STEPS[job.model] ?? 20, width: job.width,
-      height: job.height, seed: job.resultSeed, mock: true,
-      // Mirror production: plain img2img records the selected
-      // resize mode; inpaint (mask present) is fixed at crop (1).
+      ...p,
+      ...(Array.isArray(p.init_images)
+        ? { init_images: p.init_images.map(elide) }
+        : {}),
+      ...(typeof p.mask === "string" ? { mask: elide(p.mask) } : {}),
+      mock: true,
+      // Test-only provenance (not a payload field): which source
+      // the client said the init image came from.
       ...(job.mode === "img2img"
-        ? {
-            resize_mode: job.maskSent ? 1 : (job.resizeMode ?? 0),
-            init_source: job.initSource,
-            init_source_job: job.sourceJobId,
-          }
+        ? { init_source: job.initSource, init_source_job: job.sourceJobId }
         : {}),
     });
     job.status = "completed";
@@ -301,7 +296,7 @@ async function tick() {
 }
 function jobProgress(job) {
   if (job.status !== "running" || job.phase !== "generating") return null;
-  const steps = MODEL_STEPS[job.model] ?? 20;
+  const steps = job.payload?.steps ?? MODEL_STEPS[job.model] ?? 20;
   const frac = Math.min(0.99, (Date.now() - job.startedAt) / GEN_MS);
   return {
     step: Math.max(1, Math.floor(frac * steps)),
@@ -472,22 +467,10 @@ const ACTIONS = {
   },
   createJob: async (args) => {
     await tick();
-    const isInpaint = !!args.maskDataBase64;
-    if (isInpaint && args.mode !== "img2img") {
-      return { ok: false, jobId: null, error: "マスク付きの生成は img2img として実行してください。" };
-    }
-    if (args.mode === "img2img") {
-      if (args.denoisingStrength == null) {
-        return { ok: false, jobId: null, error: "denoise は 0〜1 の数値で入力してください。" };
-      }
-      const src = state.source;
-      const okSource =
-        (args.initSource === "upload" && src?.kind === "upload") ||
-        (args.sourceJobId != null &&
-          state.jobs.get(args.sourceJobId)?.status === "completed");
-      if (!okSource) {
-        return { ok: false, jobId: null, error: "元イメージが指定されていません。" };
-      }
+    // Payload passthrough, like production: the only requirement
+    // is that a payload object arrived.
+    if (!args.payload || typeof args.payload !== "object") {
+      return { ok: false, jobId: null, error: "payload が必要です。" };
     }
     const id = state.nextJobId++;
     const job = {
@@ -506,37 +489,14 @@ const ACTIONS = {
       initSource: args.initSource ?? null,
       denoisingStrength: args.denoisingStrength ?? null,
       resizeMode: args.resizeMode ?? null,
-      maskSent: isInpaint,
+      payload: args.payload,
+      maskSent: typeof args.payload.mask === "string",
       resultSeed: null, imageKey: null, displayKey: null,
       usedParams: null, loraHashes: null, error: null,
       createdAt: nowIso(), updatedAt: nowIso(),
       startedAt: Date.now(), sample: null,
     };
     state.jobs.set(id, job);
-    if (isInpaint) {
-      const mask = Buffer.from(args.maskDataBase64, "base64");
-      const isPng = mask.subarray(0, 4).equals(
-        Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-      if (!isPng || mask.length > 25 * 1024 * 1024) {
-        job.status = "failed";
-        job.error = "マスク画像を読み取れませんでした。";
-        return { ok: false, jobId: id, error: job.error };
-      }
-    }
-    const blocked = guardrailError(args.prompt ?? "");
-    if (blocked) {
-      // Production fails the job inside the worker, after createJob
-      // has already returned ok.
-      setTimeout(() => {
-        if (job.status === "running") {
-          job.status = "failed";
-          job.error = blocked;
-          job.phase = null;
-          job.startedAt = 0;
-        }
-      }, 1000);
-      job.startedAt = Date.now() + GEN_MS; // tick() must not complete it
-    }
     try {
       learnPromptWords(state.dictionary, args.prompt ?? "");
     } catch {

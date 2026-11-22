@@ -97,9 +97,10 @@ const generationRequest = z.object({
   model: z.enum(["wai", "pornmaster", "zimage"]),
   extraNegative: z.string().max(2000).default(""),
   // Editable full negative prompt (Parameter pane). Used verbatim
-  // as the negative for wai / pornmaster. Optional for backward
-  // compatibility with older clients; when omitted the server
-  // falls back to the legacy STANDARD + extra composition.
+  // as the negative for wai / pornmaster. This field is the job
+  // record's copy of the user's negative text; the payload's
+  // negative_prompt is composed client-side from it (empty for
+  // zimage).
   negativePrompt: z.string().max(4000).optional(),
   width: z.number().int().min(64).max(4096),
   height: z.number().int().min(64).max(4096),
@@ -117,15 +118,13 @@ const generationRequest = z.object({
   comicloWeight: z.number().min(0).max(1),
   // img2img (i2i): mode "img2img" runs the job against an init
   // image with denoisingStrength from the Editor pane. Which image
-  // is initSource: "job" = the generated image of sourceJobId (a
-  // completed generation job transferred from the history), or
-  // "upload" = the image currently in the Editor's upload slot
-  // (uploaded via uploadEditorImage and persisted server-side).
-  // Either way the init image is resolved server-side — from the
-  // source job's recorded host file path, or from the editor_source
-  // record's materialized host path — the client never carries
-  // image bytes. initSource null with a sourceJobId set reads as
-  // "job" for compatibility.
+  // the init was: "job" = the generated image of sourceJobId, or
+  // "upload" = the uploaded image in the source slot. These two
+  // fields are the job record's provenance only — since the
+  // payload-passthrough rework the client itself fetches the
+  // source image and carries its bytes in payload.init_images;
+  // the worker resolves nothing. initSource null with a
+  // sourceJobId set reads as "job" for compatibility.
   mode: z.enum(["txt2img", "img2img"]).default("txt2img"),
   sourceJobId: z.number().int().positive().nullable().default(null),
   initSource: z.enum(["job", "upload"]).nullable().default(null),
@@ -133,25 +132,19 @@ const generationRequest = z.object({
   // img2img resize mode (the Editor operation panel's Cover /
   // Crop / Contain / Latent selector): 0 = just resize (Cover),
   // 1 = crop and resize (Crop), 2 = resize and fill (Contain),
-  // 3 = just resize in latent space (Latent). Sent only for
-  // plain img2img; inpaint keeps its fixed crop (1) server-side
-  // and txt2img sends null.
+  // 3 = just resize in latent space (Latent). Record copy of the
+  // selection; the payload carries the effective resize_mode for
+  // img2img and inpaint alike (txt2img records null).
   resizeMode: z.number().int().min(0).max(3).nullable().default(null),
-  // Inpaint: when maskDataBase64 is present the job is an inpaint
-  // run (mode must be "img2img"; the init image resolves exactly
-  // like a plain img2img job). The client exports its painted mask
-  // as a binary opaque PNG (painted pixels white, everything else
-  // black) at the source image's natural size and sends it base64;
-  // the server validates it (PNG magic bytes, ≤ 25 MB),
-  // materializes it via the privileged writeMaskImage handler to
-  // the single-slot host file editor-mask.png, and passes that
-  // path to sd_job_priv.py as the spec's mask_path. maskBlur is
-  // the Inpaint pane's blur value (payload mask_blur) and
-  // maskInvert is the 変更範囲 toggle already converted to the
-  // payload's inpainting_mask_invert (inside = 0, outside = 1).
-  maskDataBase64: z.string().max(35000000).optional(),
-  maskBlur: z.number().int().min(0).max(16).nullable().default(null),
-  maskInvert: z.number().int().min(0).max(1).nullable().default(null),
+  // The complete sdapi payload, composed by the client: prompt
+  // (style base included), negative_prompt, steps / cfg_scale /
+  // sampler / scheduler from the form, the model's checkpoint in
+  // override_settings, and for img2img the init_images base64,
+  // denoising_strength, resize_mode and — when a mask is painted —
+  // the mask base64 with the inpaint parameters. The worker
+  // passes this object to the WebUI API verbatim: it composes
+  // nothing, fixes nothing and guards nothing.
+  payload: z.record(z.string(), z.unknown()),
 });
 
 const editorSourceView = z.object({
