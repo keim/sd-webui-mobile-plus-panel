@@ -1857,6 +1857,8 @@ export function App() {
   const [selectedUploadId, setSelectedUploadId] = useState<number | null>(null);
   const [showUploadDeleteConfirm, setShowUploadDeleteConfirm] = useState(false);
   const [uploadDeleteError, setUploadDeleteError] = useState<string | null>(null);
+  const [checkedUploadIds, setCheckedUploadIds] = useState<number[]>([]);
+  const [showUploadBulkDeleteConfirm, setShowUploadBulkDeleteConfirm] = useState(false);
   const [selectedSavedId, setSelectedSavedId] = useState<number | null>(null);
   const [checkedSavedIds, setCheckedSavedIds] = useState<number[]>([]);
   const [showSavedDeleteConfirm, setShowSavedDeleteConfirm] = useState(false);
@@ -3661,6 +3663,66 @@ export function App() {
     },
   });
 
+  // Upload-library bulk delete (History 「アップロード」 tab):
+  // deleteUploadImage is a single-record action, so the bulk
+  // delete calls it once per checked record, sequentially; the
+  // server removes each record + blobs + host file and clears
+  // any slot pointing at it. Same timeout discipline as the
+  // other deletes (one 60s budget for the whole batch); the
+  // dialog always closes and the lists always refetch on settle.
+  const deleteUploads = useMutation({
+    mutationFn: async (ids: number[]) => {
+      let timer: number | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = window.setTimeout(
+          () => reject(new Error("delete-timeout")),
+          60000,
+        );
+      });
+      const run = (async () => {
+        let failed = 0;
+        for (const uploadId of ids) {
+          try {
+            const res = await api.deleteUploadImage({ uploadId });
+            if (!res.ok || res.deleted === 0) failed++;
+          } catch {
+            failed++;
+          }
+        }
+        return { failed };
+      })();
+      try {
+        return await Promise.race([run, timeout]);
+      } finally {
+        window.clearTimeout(timer);
+      }
+    },
+    onSuccess: (res, variables) => {
+      setCheckedUploadIds([]);
+      if (selectedUploadId != null && variables.includes(selectedUploadId)) {
+        setSelectedUploadId(null);
+      }
+      setUploadDeleteError(
+        res.failed > 0
+          ? `一部の画像（${res.failed}件）を削除できませんでした。`
+          : null,
+      );
+    },
+    onError: (error) => {
+      setUploadDeleteError(
+        error instanceof Error && error.message === "delete-timeout"
+          ? "削除の応答がタイムアウトしました。一覧を再読み込みして、削除されたか確認してください。"
+          : "削除できませんでした。通信状態を確認してください。",
+      );
+    },
+    onSettled: () => {
+      setShowUploadBulkDeleteConfirm(false);
+      void queryClient.invalidateQueries({ queryKey: ["uploadImages"] });
+      void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
+    },
+  });
+
   const selectedUpload = useMemo(
     () => uploadImages.find((u) => u.id === selectedUploadId) ?? null,
     [uploadImages, selectedUploadId],
@@ -3680,6 +3742,20 @@ export function App() {
   }
   function toggleSelectAllSaved() {
     setCheckedSavedIds(allSavedSelected ? [] : savedImages.map((s) => s.id));
+  }
+
+  const allUploadsSelected =
+    uploadImages.length > 0 &&
+    uploadImages.every((u) => checkedUploadIds.includes(u.id));
+  function toggleCheckedUpload(id: number, checked: boolean) {
+    setCheckedUploadIds((prev) =>
+      checked ? [...prev, id] : prev.filter((x) => x !== id),
+    );
+  }
+  function toggleSelectAllUploads() {
+    setCheckedUploadIds(
+      allUploadsSelected ? [] : uploadImages.map((u) => u.id),
+    );
   }
 
   // Validates the form and builds the generation arguments for
@@ -6180,6 +6256,28 @@ export function App() {
                     </button>
                   </>
                 )}
+                {historyTab === "uploads" && uploadImages.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={toggleSelectAllUploads}
+                      className="border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm font-medium rounded-[var(--radius)]"
+                      aria-label={allUploadsSelected ? "全解除" : "全選択"}
+                    >
+                      {allUploadsSelected ? "全解除" : "全選択"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setUploadDeleteError(null); setShowUploadBulkDeleteConfirm(true); }}
+                      disabled={checkedUploadIds.length === 0 || deleteUploads.isPending}
+                      className="border px-3 py-2 text-sm font-medium disabled:opacity-50 rounded-[var(--radius)]"
+                      style={{ color: "var(--err)", borderColor: "var(--border)", backgroundColor: "var(--surface)" }}
+                      aria-label={`アップロード画像の選択削除（${checkedUploadIds.length}）`}
+                    >
+                      {`選択削除（${checkedUploadIds.length}）`}
+                    </button>
+                  </>
+                )}
               </div>
               {/* Pane-local tabs: 「出力」 is the generation history
                   below as before; 「保存」 switches the list region
@@ -6559,6 +6657,32 @@ export function App() {
                           </span>
                         </span>
                       </button>
+                      {s.imageUrl && (
+                        <DownloadButton
+                          url={s.imageUrl}
+                          fileName={`${s.name}.${s.fileExt}`}
+                          ariaLabel={`保存画像 ${s.name} をダウンロード`}
+                          onSettled={reconcileAfterDownload}
+                          className="flex shrink-0 items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
+                          style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
+                        >
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M12 4v11" />
+                            <path d="M7 11l5 5 5-5" />
+                            <path d="M4 20h16" />
+                          </svg>
+                        </DownloadButton>
+                      )}
                     </div>
                   </li>
                   );
@@ -6660,29 +6784,45 @@ export function App() {
               )}
               <ul>
                 {uploadImages.map((u) => {
+                  const isChecked = checkedUploadIds.includes(u.id);
                   const thumb = u.displayUrl ?? u.imageUrl;
                   return (
                   <li key={u.id} className="border-b border-[var(--border)]">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedUploadId(u.id === selectedUploadId ? null : u.id)}
-                      className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left"
-                      aria-label={`アップロード画像 ${u.fileName ?? u.storedName}`}
-                    >
-                      {thumb ? (
-                        <img src={thumb} alt="" className="h-16 w-16 shrink-0 object-cover" />
-                      ) : (
-                        <span className="flex h-16 w-16 shrink-0 items-center justify-center bg-[var(--surface-alt)] text-xs text-[var(--dim)]">
-                          画像なし
+                    <div className="flex w-full items-center gap-2 px-3 py-2">
+                      <label
+                        className="flex shrink-0 cursor-pointer items-center justify-center p-1"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => toggleCheckedUpload(u.id, e.target.checked)}
+                          className="h-5 w-5"
+                          style={{ accentColor: "var(--accent)" }}
+                          aria-label={`アップロード画像 ${u.fileName ?? u.storedName} を選択`}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedUploadId(u.id === selectedUploadId ? null : u.id)}
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        aria-label={`アップロード画像 ${u.fileName ?? u.storedName}`}
+                      >
+                        {thumb ? (
+                          <img src={thumb} alt="" className="h-16 w-16 shrink-0 object-cover" />
+                        ) : (
+                          <span className="flex h-16 w-16 shrink-0 items-center justify-center bg-[var(--surface-alt)] text-xs text-[var(--dim)]">
+                            画像なし
+                          </span>
+                        )}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">{u.fileName ?? u.storedName}</span>
+                          <span className={`mt-0.5 block text-xs text-[var(--dim)] ${MONO}`}>
+                            {`${fmtTime(u.createdAt)} ・ ${fmtBytes(u.byteSize)}`}
+                          </span>
                         </span>
-                      )}
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-medium">{u.fileName ?? u.storedName}</span>
-                        <span className={`mt-0.5 block text-xs text-[var(--dim)] ${MONO}`}>
-                          {`${fmtTime(u.createdAt)} ・ ${fmtBytes(u.byteSize)}`}
-                        </span>
-                      </span>
-                    </button>
+                      </button>
+                    </div>
                   </li>
                   );
                 })}
@@ -7108,6 +7248,44 @@ export function App() {
                 style={{ backgroundColor: "var(--err)" }}
               >
                 {deleteSaved.isPending ? "削除中…" : "削除する"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showUploadBulkDeleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backgroundColor: "rgba(38,24,58,0.55)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="アップロード画像削除の確認"
+          onClick={() => setShowUploadBulkDeleteConfirm(false)}
+        >
+          <div
+            className="w-full max-w-sm border border-[var(--border)] bg-[var(--surface)] p-5 rounded-[var(--radius)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold">アップロード画像を削除しますか？</h3>
+            <p className="mt-2 text-sm text-[var(--text)]">
+              {`選択した ${checkedUploadIds.length} 件のアップロード画像を削除します。`}
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowUploadBulkDeleteConfirm(false)}
+                className="flex-1 border border-[var(--border)] bg-[var(--surface-alt)] px-4 py-2.5 text-sm font-medium rounded-[var(--radius)]"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteUploads.mutate([...checkedUploadIds])}
+                disabled={deleteUploads.isPending || checkedUploadIds.length === 0}
+                className="flex-1 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 rounded-[var(--radius)]"
+                style={{ backgroundColor: "var(--err)" }}
+              >
+                {deleteUploads.isPending ? "削除中…" : "削除する"}
               </button>
             </div>
           </div>
