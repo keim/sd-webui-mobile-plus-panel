@@ -16,17 +16,18 @@ if [ ! -d "$EXT_DIR" ]; then
   exit 1
 fi
 
-bun run build
-
 STAMP="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
   STAMP="$STAMP-dirty"
 fi
 STAMP="$STAMP $(date '+%Y-%m-%d %H:%M %Z')"
 
+WB_STAMP="${STAMP%% *}" bun run build
+
 mkdir -p "$TARGET"
 rm -rf "$TARGET/assets"
 cp dist/index.html "$TARGET/index.html"
+cp dist/manifest.webmanifest dist/sw.js dist/icon-192.png dist/icon-512.png "$TARGET/"
 cp -r dist/assets "$TARGET/assets"
 printf '%s\n' "$STAMP" > "$TARGET/VERSION"
 

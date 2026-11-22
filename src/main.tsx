@@ -26,3 +26,24 @@ createRoot(rootEl).render(
     </QueryClientProvider>
   </StrictMode>,
 );
+
+// PWA: the workbench is installable from its /mobileplus/ scope. The
+// service worker caches only the app shell (see pwa/sw.js); failures
+// are non-fatal — the workbench keeps working as a plain web page.
+// The manifest and touch-icon links are injected here rather than in
+// index.html: the bundler would try to resolve them as bundle assets.
+{
+  const manifestLink = document.createElement("link");
+  manifestLink.rel = "manifest";
+  manifestLink.href = "./manifest.webmanifest";
+  document.head.appendChild(manifestLink);
+  const touchIcon = document.createElement("link");
+  touchIcon.rel = "apple-touch-icon";
+  touchIcon.href = "./icon-192.png";
+  document.head.appendChild(touchIcon);
+}
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
