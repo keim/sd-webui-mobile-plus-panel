@@ -185,13 +185,97 @@ function modelShortLabel(key: string | null): string {
   return MODELS.find((m) => m.key === key)?.shortLabel ?? key ?? "";
 }
 
-// Weight formatting for the composed prompt, mirroring Python's
-// %g (the old server-side composition): integers print without a
-// decimal point, fractions in shortest round-trip form. String(n)
-// matches %g across the weight ranges the form allows.
-function fmtWeight(n: number): string {
-  return String(n);
+// --- Per-model positive prompt templates (2026-11-23) ---
+// Each model holds a template; the final positive prompt is the
+// template with its %...% tokens replaced:
+//   %prompt%                  -> the prompt area's text, as-is
+//   %label:min:max:step:def%  -> a numeric parameter; one slider
+//                                per parameter appears in the
+//                                style （画風） popup, and the
+//                                token is replaced by its value
+// Any other %...% token is left in the text untouched.
+type TemplateParam = {
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  def: number;
+};
+
+const TEMPLATE_PARAM_RE =
+  /^([^:]+):(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?)$/;
+
+function parseTemplateParamToken(token: string): TemplateParam | null {
+  const m = TEMPLATE_PARAM_RE.exec(token);
+  if (!m) return null;
+  const label = m[1]!.trim();
+  const min = Number(m[2]);
+  const max = Number(m[3]);
+  const step = Number(m[4]);
+  const def = Number(m[5]);
+  if (!label || !(min < max) || !(step > 0)) return null;
+  return { label, min, max, step, def: Math.min(max, Math.max(min, def)) };
 }
+
+// The template's numeric parameters, in order of first
+// appearance, deduplicated by label.
+function parseTemplateParams(template: string): TemplateParam[] {
+  const out: TemplateParam[] = [];
+  const seen = new Set<string>();
+  for (const match of template.matchAll(/%([^%]+)%/g)) {
+    const p = parseTemplateParamToken(match[1]!);
+    if (p && !seen.has(p.label)) {
+      seen.add(p.label);
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+// The default value of every numeric parameter in a template
+// (its def, from the token syntax).
+function templateParamDefaults(
+  template: string,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const p of parseTemplateParams(template)) out[p.label] = p.def;
+  return out;
+}
+
+// Value formatting for substitution and slider displays: rounded
+// to the step's decimal places, shortest form (1.20 -> "1.2",
+// 1 -> "1").
+function formatTemplateValue(v: number, step: number): string {
+  const stepText = String(step);
+  const decimals = stepText.includes(".")
+    ? stepText.split(".")[1]!.length
+    : 0;
+  return String(parseFloat(v.toFixed(Math.min(decimals, 10))));
+}
+
+function applyPromptTemplate(
+  template: string,
+  content: string,
+  values: Record<string, number>,
+): string {
+  return template.replace(/%([^%]+)%/g, (whole, token: string) => {
+    if (token === "prompt") return content;
+    const p = parseTemplateParamToken(token);
+    if (!p) return whole;
+    const v = values[p.label] ?? p.def;
+    const clamped = Math.min(p.max, Math.max(p.min, v));
+    return formatTemplateValue(clamped, p.step);
+  });
+}
+
+// The models' built-in templates. wai's reproduces the former
+// fixed style base (photorealistic + comiclo LoRA ahead of the
+// prompt); the other models send the prompt as-is.
+const DEFAULT_TEMPLATES: Record<ModelKey, string> = {
+  wai: "(photorealistic: %写実的:0:2:0.1:1.2%), <lora:comiclo-xl-pony:%コミック調:0:1:0.05:0.7%>, %prompt%",
+  pornmaster: "%prompt%",
+  zimage: "%prompt%",
+};
 
 // Fetch an image URL (the workbench's own /files/ route) and
 // return its raw base64 — the client now carries the img2img init
@@ -208,6 +292,47 @@ async function fetchImageAsBase64(url: string): Promise<string> {
   });
   const comma = dataUrl.indexOf(",");
   return comma >= 0 ? dataUrl.slice(comma + 1) : "";
+}
+
+// A labelled segmented choice in the Parameter pane's style (the
+// seed-mode selector's shape): one row of options, the active one
+// filled with the accent color.
+function SegmentedSetting(props: {
+  label: string;
+  options: { key: string; label: string }[];
+  value: string;
+  onPick: (key: string) => void;
+}) {
+  return (
+    <div>
+      <span className="block text-xs text-[var(--dim)] mb-1">{props.label}</span>
+      <div
+        className="flex border border-[var(--border)]"
+        role="group"
+        aria-label={props.label}
+      >
+        {props.options.map((o, i) => (
+          <button
+            key={o.key}
+            type="button"
+            aria-pressed={props.value === o.key}
+            onClick={() => props.onPick(o.key)}
+            className={`flex-1 px-2 py-2 text-sm ${
+              props.value === o.key ? "" : "bg-[var(--surface)]"
+            }`}
+            style={{
+              borderLeft: i > 0 ? "1px solid var(--border)" : undefined,
+              ...(props.value === o.key
+                ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                : {}),
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // Base display for history: each tag appears only when its weight
@@ -593,15 +718,18 @@ function findPromptTextMatch(
 
 // --- Workspace state backup / restore ---
 // The form's current values are backed up to the DB as two JSON
-// payloads in one record: a settings snapshot (Parameters-pane values)
-// and a prompt snapshot (prompt text + extra negative). At startup the
-// saved values, when present and valid, override the form defaults
-// field by field; anything missing or invalid keeps the current
-// (default) value.
+// payloads in one record: a settings bundle and a prompt snapshot
+// (prompt text + extra negative). The settings bundle remembers
+// the parameters PER MODEL (2026-11-23): { model, models: { wai:
+// record, pornmaster: record, zimage: record } }, where a record
+// is one model's SettingsSnapshot. Switching models restores that
+// model's last-used record (its defaults on first use). At startup
+// the saved values, when present and valid, override the defaults
+// field by field. Legacy saves (a flat snapshot with a model
+// field) are read as the record of their model.
 type SettingsSnapshot = {
-  model: ModelKey;
-  photorealisticWeight: string;
-  comicloWeight: string;
+  promptTemplate: string;
+  templateValues: Record<string, number>;
   sizeKey: string | null;
   width: string;
   height: string;
@@ -620,6 +748,16 @@ type SettingsSnapshot = {
   maskBlur: string;
   brushSize: string;
   penTool: string;
+  // The payload's formerly fixed values, now specifiable from
+  // the Parameter pane's 詳細設定 (payload-passthrough follow-up):
+  // override_settings_restore_afterwards (default false) and the
+  // inpaint trio (fill / full-res / full-res padding).
+  // include_init_images stays a fixed false in the composition —
+  // keim asked for no control for it (2026-11-23).
+  restoreAfterwards: boolean;
+  inpaintingFill: number;
+  inpaintFullRes: boolean;
+  inpaintFullResPadding: string;
 };
 
 type PromptSnapshot = {
@@ -632,9 +770,12 @@ type PromptSnapshot = {
 // built the same way (the dirty checks compare serialized strings).
 function settingsSnapshotOf(v: SettingsSnapshot): SettingsSnapshot {
   return {
-    model: v.model,
-    photorealisticWeight: v.photorealisticWeight,
-    comicloWeight: v.comicloWeight,
+    promptTemplate: v.promptTemplate,
+    templateValues: Object.fromEntries(
+      Object.entries(v.templateValues).sort(([a], [b]) =>
+        a < b ? -1 : a > b ? 1 : 0,
+      ),
+    ),
     sizeKey: v.sizeKey,
     width: v.width,
     height: v.height,
@@ -653,6 +794,10 @@ function settingsSnapshotOf(v: SettingsSnapshot): SettingsSnapshot {
     maskBlur: v.maskBlur,
     brushSize: v.brushSize,
     penTool: v.penTool,
+    restoreAfterwards: v.restoreAfterwards,
+    inpaintingFill: v.inpaintingFill,
+    inpaintFullRes: v.inpaintFullRes,
+    inpaintFullResPadding: v.inpaintFullResPadding,
   };
 }
 
@@ -677,21 +822,27 @@ function savedString(v: unknown): string | null {
 // Merges a saved settings record over the current values: each field
 // is taken from the save only when present and valid, otherwise the
 // current value (the form default at startup) is kept.
-function restoredSettings(
+function restoredRecord(
   saved: Record<string, unknown>,
-  current: SettingsSnapshot,
+  base: SettingsSnapshot,
 ): SettingsSnapshot {
-  const next = { ...current };
-  if (
-    typeof saved.model === "string" &&
-    MODELS.some((m) => m.key === saved.model)
-  ) {
-    next.model = saved.model as ModelKey;
+  const next = { ...base };
+  if (typeof saved.promptTemplate === "string") {
+    next.promptTemplate = saved.promptTemplate;
   }
-  const pw = savedString(saved.photorealisticWeight);
-  if (pw != null) next.photorealisticWeight = pw;
-  const cw = savedString(saved.comicloWeight);
-  if (cw != null) next.comicloWeight = cw;
+  if (
+    saved.templateValues &&
+    typeof saved.templateValues === "object" &&
+    !Array.isArray(saved.templateValues)
+  ) {
+    const tv: Record<string, number> = {};
+    for (const [k, val] of Object.entries(
+      saved.templateValues as Record<string, unknown>,
+    )) {
+      if (typeof val === "number" && Number.isFinite(val)) tv[k] = val;
+    }
+    next.templateValues = tv;
+  }
   if (
     typeof saved.sizeKey === "string" &&
     SIZE_PRESETS.some((p) => p.key === saved.sizeKey)
@@ -773,7 +924,111 @@ function restoredSettings(
   if (saved.penTool === "pen" || saved.penTool === "eraser") {
     next.penTool = saved.penTool;
   }
+  if (typeof saved.restoreAfterwards === "boolean") {
+    next.restoreAfterwards = saved.restoreAfterwards;
+  }
+  if (
+    saved.inpaintingFill === 0 || saved.inpaintingFill === 1 ||
+    saved.inpaintingFill === 2 || saved.inpaintingFill === 3
+  ) {
+    next.inpaintingFill = saved.inpaintingFill;
+  }
+  if (typeof saved.inpaintFullRes === "boolean") {
+    next.inpaintFullRes = saved.inpaintFullRes;
+  }
+  const frp = savedString(saved.inpaintFullResPadding);
+  if (frp != null) {
+    const n = Number(frp);
+    if (Number.isInteger(n) && n >= 0 && n <= 256) {
+      next.inpaintFullResPadding = frp;
+    }
+  }
   return settingsSnapshotOf(next);
+}
+
+// One model's factory defaults: the app-wide initial values, with
+// steps / cfg / sampler / scheduler from the model's recipe and
+// the model-linked style / denoise presets (wai gets the standard
+// base — photorealistic 1.2 / comiclo 0.7, denoise 0.35; the other
+// models get a neutral style and denoise 0.5). Used on a model's
+// first use and by the Parameter pane's reset button.
+function defaultSettingsFor(key: ModelKey): SettingsSnapshot {
+  const recipe = MODELS.find((m) => m.key === key) ?? MODELS[0]!;
+  return settingsSnapshotOf({
+    promptTemplate: DEFAULT_TEMPLATES[key],
+    templateValues: templateParamDefaults(DEFAULT_TEMPLATES[key]),
+    sizeKey: "3:4",
+    width: "1088",
+    height: "1472",
+    pixelSize: DEFAULT_PIXEL_SIZE,
+    blockSize: DEFAULT_BLOCK_SIZE,
+    seedMode: "random",
+    seedText: "",
+    steps: String(recipe.steps),
+    cfg: String(recipe.cfg),
+    sampler: recipe.sampler,
+    scheduler: recipe.scheduler,
+    img2imgChecked: false,
+    denoisingStrength: key === "wai" ? "0.35" : "0.5",
+    resizeMode: 0,
+    maskMode: "masked",
+    maskBlur: "0",
+    brushSize: "100",
+    penTool: "pen",
+    restoreAfterwards: false,
+    inpaintingFill: 1,
+    inpaintFullRes: false,
+    inpaintFullResPadding: "32",
+  });
+}
+
+// Parses a saved settings JSON into the per-model bundle. The
+// current format is { model, models: { <key>: record } }; legacy
+// flat snapshots (a record with a model field) are read as the
+// record of their model, merged over that model's defaults.
+function parseSettingsBundle(saved: Record<string, unknown>): {
+  model: ModelKey;
+  records: Partial<Record<ModelKey, SettingsSnapshot>>;
+} | null {
+  if (Object.keys(saved).length === 0) return null;
+  const records: Partial<Record<ModelKey, SettingsSnapshot>> = {};
+  let model: ModelKey = "wai";
+  if (
+    typeof saved.model === "string" &&
+    MODELS.some((m) => m.key === saved.model)
+  ) {
+    model = saved.model as ModelKey;
+  }
+  const models = saved.models;
+  if (models && typeof models === "object" && !Array.isArray(models)) {
+    for (const m of MODELS) {
+      const rec = (models as Record<string, unknown>)[m.key];
+      if (rec && typeof rec === "object" && !Array.isArray(rec)) {
+        records[m.key] = restoredRecord(
+          rec as Record<string, unknown>,
+          defaultSettingsFor(m.key),
+        );
+      }
+    }
+  } else if (Object.keys(saved).length > 0) {
+    records[model] = restoredRecord(saved, defaultSettingsFor(model));
+  }
+  return { model, records };
+}
+
+// The canonical settings-bundle JSON for a model + records map:
+// fixed key order (model, then models in MODELS order) so the
+// dirty checks compare stable strings.
+function settingsBundleJson(
+  model: ModelKey,
+  records: Partial<Record<ModelKey, SettingsSnapshot>>,
+): string {
+  const models: Partial<Record<ModelKey, SettingsSnapshot>> = {};
+  for (const m of MODELS) {
+    const rec = records[m.key];
+    if (rec) models[m.key] = rec;
+  }
+  return JSON.stringify({ model, models });
 }
 
 function restoredPrompt(
@@ -1360,6 +1615,12 @@ export function App() {
   const [resizeMode, setResizeMode] = useState(0);
   const [maskMode, setMaskMode] = useState("masked");
   const [maskBlur, setMaskBlur] = useState("0");
+  // The payload's formerly fixed values, edited in the Parameter
+  // pane's 詳細設定 and backed up in the settings snapshot.
+  const [restoreAfterwards, setRestoreAfterwards] = useState(false);
+  const [inpaintingFill, setInpaintingFill] = useState(1);
+  const [inpaintFullRes, setInpaintFullRes] = useState(false);
+  const [inpaintFullResPadding, setInpaintFullResPadding] = useState("32");
   // Inpaint brush: diameter in DISPLAY pixels (4..200 step 4) and
   // the current tool. Both are backed up in the settings snapshot;
   // the painted mask itself is not (it lives in the mask canvas
@@ -1526,6 +1787,11 @@ export function App() {
   // --- form state ---
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState<ModelKey>("wai");
+  // Per-model parameter records for the models that are NOT
+  // current (the live form state is the current model's record).
+  const [byModel, setByModel] = useState<
+    Partial<Record<ModelKey, SettingsSnapshot>>
+  >({});
   const [sizeKey, setSizeKey] = useState<string | null>("3:4");
   const [width, setWidth] = useState("1088");
   const [height, setHeight] = useState("1472");
@@ -1538,8 +1804,18 @@ export function App() {
   const [cfg, setCfg] = useState("5.5");
   const [sampler, setSampler] = useState("DPM++ 2M");
   const [scheduler, setScheduler] = useState("Karras");
-  const [photorealisticWeight, setPhotorealisticWeight] = useState("1");
-  const [comicloWeight, setComicloWeight] = useState("0.7");
+  const [promptTemplate, setPromptTemplate] = useState(
+    DEFAULT_TEMPLATES.wai,
+  );
+  const [templateValues, setTemplateValues] = useState<
+    Record<string, number>
+  >(() => templateParamDefaults(DEFAULT_TEMPLATES.wai));
+  // The Parameter pane's template editor works on a draft; the
+  // committed template above (and the numeric values' reset) only
+  // change when its テンプレート保存 button is pressed.
+  const [templateDraft, setTemplateDraft] = useState(
+    DEFAULT_TEMPLATES.wai,
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [checkedIds, setCheckedIds] = useState<number[]>([]);
@@ -1614,10 +1890,9 @@ export function App() {
     queryFn: () => api.getWorkspaceState({}),
   });
 
-  const settingsSnapshot = settingsSnapshotOf({
-    model,
-    photorealisticWeight,
-    comicloWeight,
+  const liveSnapshot = settingsSnapshotOf({
+    promptTemplate,
+    templateValues,
     sizeKey,
     width,
     height,
@@ -1636,8 +1911,22 @@ export function App() {
     maskBlur,
     brushSize,
     penTool,
+    restoreAfterwards,
+    inpaintingFill,
+    inpaintFullRes,
+    inpaintFullResPadding,
   });
-  const settingsJson = JSON.stringify(settingsSnapshot);
+  // The saved settings are the per-model bundle: the live form is
+  // the current model's record; the other models' records are
+  // held in byModel (written when switching away from them, or at
+  // startup restore).
+  const settingsJson = settingsBundleJson(model, {
+    ...byModel,
+    [model]: liveSnapshot,
+  });
+  // The style popup's sliders are driven by the committed
+  // template's numeric parameters.
+  const styleParams = parseTemplateParams(promptTemplate);
   const promptSnapshot: PromptSnapshot = { prompt, negativePrompt };
   const promptJson = JSON.stringify(promptSnapshot);
 
@@ -1725,54 +2014,23 @@ export function App() {
     if (!data) return;
     if (standardNegativeQuery.data == null) return;
     restoredRef.current = true;
-    const nextSettings = restoredSettings(
-      parseJsonRecord(data.settings),
-      settingsSnapshotOf({
-        model,
-        photorealisticWeight,
-        comicloWeight,
-        sizeKey,
-        width,
-        height,
-        pixelSize,
-        blockSize,
-        seedMode,
-        seedText,
-        steps,
-        cfg,
-        sampler,
-        scheduler,
-        img2imgChecked,
-        denoisingStrength: editorDenoise,
-    resizeMode,
-        maskMode,
-        maskBlur,
-        brushSize,
-        penTool,
-      }),
-    );
-    setModel(nextSettings.model);
-    setPhotorealisticWeight(nextSettings.photorealisticWeight);
-    setComicloWeight(nextSettings.comicloWeight);
-    setSizeKey(nextSettings.sizeKey);
-    setWidth(nextSettings.width);
-    setHeight(nextSettings.height);
-    setPixelSize(nextSettings.pixelSize);
-    setBlockSize(nextSettings.blockSize);
-    setSeedMode(nextSettings.seedMode);
-    setSeedText(nextSettings.seedText);
-    setSteps(nextSettings.steps);
-    setCfg(nextSettings.cfg);
-    setSampler(nextSettings.sampler);
-    setScheduler(nextSettings.scheduler);
-    setImg2imgChecked(nextSettings.img2imgChecked);
-    setEditorDenoise(nextSettings.denoisingStrength);
-    setResizeMode(nextSettings.resizeMode);
-    setMaskMode(nextSettings.maskMode);
-    setMaskBlur(nextSettings.maskBlur);
-    setBrushSize(nextSettings.brushSize);
-    setPenTool(nextSettings.penTool === "eraser" ? "eraser" : "pen");
-    lastSavedSettingsRef.current = JSON.stringify(nextSettings);
+    const bundle = parseSettingsBundle(parseJsonRecord(data.settings));
+    if (bundle) {
+      const currentRecord =
+        bundle.records[bundle.model] ?? defaultSettingsFor(bundle.model);
+      setByModel(bundle.records);
+      setModel(bundle.model);
+      applySettingsRecord(currentRecord);
+      lastSavedSettingsRef.current = settingsBundleJson(bundle.model, {
+        ...bundle.records,
+        [bundle.model]: currentRecord,
+      });
+    } else {
+      // No saved settings at all: keep the form's initial values
+      // as-is (they are NOT any model's defaults — e.g. the wai
+      // weights start at 1 / 0.7, not the 1.2 / 0.7 preset).
+      lastSavedSettingsRef.current = settingsJsonRef.current;
+    }
     const savedPromptRecord = parseJsonRecord(data.prompt);
     const hadSavedNegative = typeof savedPromptRecord.negativePrompt === "string";
     const nextPrompt = restoredPrompt(savedPromptRecord, {
@@ -2734,33 +2992,72 @@ export function App() {
     }
   }
 
+  // Applies one model's parameter record to the live form (the
+  // startup restore, model switching, and the reset button all
+  // go through here).
+  function applySettingsRecord(nextSettings: SettingsSnapshot) {
+    setPromptTemplate(nextSettings.promptTemplate);
+    setTemplateDraft(nextSettings.promptTemplate);
+    setTemplateValues(nextSettings.templateValues);
+    setSizeKey(nextSettings.sizeKey);
+    setWidth(nextSettings.width);
+    setHeight(nextSettings.height);
+    setPixelSize(nextSettings.pixelSize);
+    setBlockSize(nextSettings.blockSize);
+    setSeedMode(nextSettings.seedMode);
+    setSeedText(nextSettings.seedText);
+    setSteps(nextSettings.steps);
+    setCfg(nextSettings.cfg);
+    setSampler(nextSettings.sampler);
+    setScheduler(nextSettings.scheduler);
+    setImg2imgChecked(nextSettings.img2imgChecked);
+    setEditorDenoise(nextSettings.denoisingStrength);
+    setResizeMode(nextSettings.resizeMode);
+    setMaskMode(nextSettings.maskMode);
+    setMaskBlur(nextSettings.maskBlur);
+    setBrushSize(nextSettings.brushSize);
+    setPenTool(nextSettings.penTool === "eraser" ? "eraser" : "pen");
+    setRestoreAfterwards(nextSettings.restoreAfterwards);
+    setInpaintingFill(nextSettings.inpaintingFill);
+    setInpaintFullRes(nextSettings.inpaintFullRes);
+    setInpaintFullResPadding(nextSettings.inpaintFullResPadding);
+  }
+
   function applyModel(key: ModelKey) {
     markSettingsImmediate();
+    if (key === model) return;
+    // Parameters are remembered per model (2026-11-23): stash the
+    // live form as the outgoing model's record, then restore the
+    // incoming model's last-used record — its defaults on first
+    // use. (This replaces the old behavior of reseeding the
+    // recipe + style presets on every selection; those presets
+    // now live in defaultSettingsFor.)
+    setByModel((prev) => ({ ...prev, [model]: liveSnapshot }));
     setModel(key);
-    const def = MODELS.find((m) => m.key === key);
-    if (def) {
-      setSteps(String(def.steps));
-      setCfg(String(def.cfg));
-      setSampler(def.sampler);
-      setScheduler(def.scheduler);
+    applySettingsRecord(byModel[key] ?? defaultSettingsFor(key));
+  }
+
+  // The Parameter pane's reset button: the selected model's
+  // parameters back to its defaults. Other models' records are
+  // untouched.
+  function resetModelSettings() {
+    markSettingsImmediate();
+    applySettingsRecord(defaultSettingsFor(model));
+  }
+
+  // The template editor's save button: commit the draft as the
+  // model's template. A changed template redefines the numeric
+  // parameters, so their values reset to the new template's
+  // defaults (keim's rule, 2026-11-23); every other parameter is
+  // untouched.
+  function savePromptTemplate() {
+    if (templateDraft === promptTemplate) {
+      flushSettingsSave();
+      return;
     }
-    // Model-linked style / denoise presets: (re)selecting a model
-    // in the Editor's model popup also rewrites the style weights
-    // and the img2img denoise — wai gets the standard base values
-    // (photorealistic 1.2 / comiclo 0.7, denoise 0.35); every other
-    // model gets a neutral style (0 / 0) and denoise 0.5. This
-    // fires ONLY on an explicit model selection here: startup /
-    // workspace-state restore applies the saved values as-is and
-    // never passes through this function.
-    if (key === "wai") {
-      setPhotorealisticWeight("1.2");
-      setComicloWeight("0.7");
-      setEditorDenoise("0.35");
-    } else {
-      setPhotorealisticWeight("0");
-      setComicloWeight("0");
-      setEditorDenoise("0.5");
-    }
+    markSettingsImmediate();
+    setPromptTemplate(templateDraft);
+    setTemplateValues(templateParamDefaults(templateDraft));
   }
 
   // Recalculates width/height from (aspect ratio × pixel size ×
@@ -3387,28 +3684,19 @@ export function App() {
       setFormError("CFG は 0〜30 の数値で入力してください。");
       return null;
     }
-    const pwRaw = Number(photorealisticWeight);
-    const cwRaw = Number(comicloWeight);
-    if (
-      photorealisticWeight.trim() === "" ||
-      !Number.isFinite(pwRaw) ||
-      pwRaw < -1 ||
-      pwRaw > 2
-    ) {
-      setFormError("photorealistic の強調値は -1〜2 の数値で入力してください。");
-      return null;
-    }
-    if (
-      comicloWeight.trim() === "" ||
-      !Number.isFinite(cwRaw) ||
-      cwRaw < 0 ||
-      cwRaw > 1
-    ) {
-      setFormError("comiclo LoRA の強調値は 0〜1 の数値で入力してください。");
-      return null;
-    }
-    const pw = pwRaw;
-    const cw = cwRaw;
+    // The job record still carries the two canonical style
+    // weights (the history's base display reads them): they are
+    // the template values of the 写実的 / コミック調 parameters
+    // when the model's template defines them, else 0. The full
+    // provenance is the payload itself (usedParams).
+    const pw = Math.min(
+      2,
+      Math.max(-1, templateValues["写実的"] ?? 0),
+    );
+    const cw = Math.min(
+      1,
+      Math.max(0, templateValues["コミック調"] ?? 0),
+    );
     let seedArg: { seedMode: "random" | "fixed"; seed: number | null };
     if (seedMode === "random") {
       seedArg = { seedMode: "random", seed: null };
@@ -3513,22 +3801,19 @@ export function App() {
     // Compose the complete sdapi payload here in the client (the
     // payload-passthrough rework): the worker manages no
     // parameters at all and hands this object to the WebUI API
-    // verbatim. The style base is folded into the prompt from the
-    // two weights (0 = tag omitted), the negative is the form's
-    // text (empty for zimage), steps / cfg / sampler / scheduler
-    // are the form's values, and the checkpoint comes from the
-    // model's recipe entry in MODELS.
+    // verbatim. The positive prompt is the model's template with
+    // %prompt% and its numeric parameters replaced by their
+    // values, the negative is the form's text (empty for
+    // zimage), steps / cfg / sampler / scheduler are the form's
+    // values, and the checkpoint comes from the model's recipe
+    // entry in MODELS.
     const recipe = MODELS.find((m) => m.key === model) ?? MODELS[0]!;
     const content = prompt.trim();
-    const baseParts: string[] = [];
-    if (pw !== 0) baseParts.push(`(photorealistic: ${fmtWeight(pw)})`);
-    if (cw !== 0) baseParts.push(`<lora:comiclo-xl-pony:${fmtWeight(cw)}>`);
-    const fullPrompt =
-      baseParts.length > 0
-        ? content
-          ? `${baseParts.join(", ")}, ${content}`
-          : baseParts.join(", ")
-        : content;
+    const fullPrompt = applyPromptTemplate(
+      promptTemplate,
+      content,
+      templateValues,
+    );
     const payload: Record<string, unknown> = {
       prompt: fullPrompt,
       negative_prompt: model === "zimage" ? "" : negativePrompt,
@@ -3540,7 +3825,7 @@ export function App() {
       scheduler,
       seed: seedArg.seed ?? -1,
       override_settings: { sd_model_checkpoint: recipe.checkpoint },
-      override_settings_restore_afterwards: true,
+      override_settings_restore_afterwards: restoreAfterwards,
     };
     if (i2i.mode === "img2img") {
       const srcUrl = sourceImage.imageUrl ?? sourceImage.displayUrl;
@@ -3565,9 +3850,12 @@ export function App() {
         payload.mask = mask.data;
         payload.mask_blur = mask.blur;
         payload.inpainting_mask_invert = mask.invert;
-        payload.inpainting_fill = 1;
-        payload.inpaint_full_res = false;
-        payload.inpaint_full_res_padding = 32;
+        // The inpaint trio comes from the 詳細設定 values.
+        payload.inpainting_fill = inpaintingFill;
+        payload.inpaint_full_res = inpaintFullRes;
+        const frp = Number(inpaintFullResPadding);
+        payload.inpaint_full_res_padding =
+          Number.isInteger(frp) && frp >= 0 && frp <= 256 ? frp : 32;
       }
     }
     return {
@@ -4558,44 +4846,42 @@ export function App() {
     </div>
   ) : editorPopup === "style" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="画風設定">
-      <div>
-        <label htmlFor="style-photo" className="flex items-center justify-between text-sm">
-          <span>photorealistic</span>
-          <span className={MONO}>{photorealisticWeight}</span>
-        </label>
-        <input
-          {...FIELDS.createJob.photorealisticWeight}
-          id="style-photo"
-          aria-label="photorealistic 強調値"
-          type="range"
-          min={-1}
-          max={2}
-          step={0.1}
-          value={photorealisticWeight}
-          onChange={(e) => setPhotorealisticWeight(e.target.value)}
-          onBlur={flushSettingsSave}
-          className="w-full"
-        />
-      </div>
-      <div className="mt-1.5">
-        <label htmlFor="style-lora" className="flex items-center justify-between text-sm">
-          <span>comiclo LoRA</span>
-          <span className={MONO}>{comicloWeight}</span>
-        </label>
-        <input
-          {...FIELDS.createJob.comicloWeight}
-          id="style-lora"
-          aria-label="comiclo LoRA 強調値"
-          type="range"
-          min={0}
-          max={1}
-          step={0.1}
-          value={comicloWeight}
-          onChange={(e) => setComicloWeight(e.target.value)}
-          onBlur={flushSettingsSave}
-          className="w-full"
-        />
-      </div>
+      {styleParams.length === 0 ? (
+        <p className="text-sm text-[var(--dim)]">
+          テンプレートに数値パラメータがありません。
+        </p>
+      ) : (
+        styleParams.map((p, i) => (
+          <div key={p.label} className={i > 0 ? "mt-1.5" : undefined}>
+            <label
+              htmlFor={`style-param-${i}`}
+              className="flex items-center justify-between text-sm"
+            >
+              <span>{p.label}</span>
+              <span className={MONO}>
+                {formatTemplateValue(templateValues[p.label] ?? p.def, p.step)}
+              </span>
+            </label>
+            <input
+              id={`style-param-${i}`}
+              aria-label={`${p.label} の値`}
+              type="range"
+              min={p.min}
+              max={p.max}
+              step={p.step}
+              value={templateValues[p.label] ?? p.def}
+              onChange={(e) =>
+                setTemplateValues((prev) => ({
+                  ...prev,
+                  [p.label]: Number(e.target.value),
+                }))
+              }
+              onBlur={flushSettingsSave}
+              className="w-full"
+            />
+          </div>
+        ))
+      )}
     </div>
   ) : editorPopup === "denoise" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="デノイズ設定">
@@ -5223,7 +5509,7 @@ export function App() {
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">画風</span>
-                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{`(${photorealisticWeight}, ${comicloWeight})`}</span>
+                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{styleParams.length > 0 ? `(${styleParams.map((p) => formatTemplateValue(templateValues[p.label] ?? p.def, p.step)).join(", ")})` : "なし"}</span>
                 </button>
                 <span
                   aria-hidden="true"
@@ -5630,6 +5916,40 @@ export function App() {
                 リロード
               </button>
             </div>
+            {/* Prompt template editor (per model): the draft is
+                committed by the テンプレート保存 button above the
+                textarea; committing a changed template resets the
+                numeric parameter values to the new template's
+                defaults. */}
+            <div className="mb-2">
+              <div className="mb-1 flex items-center justify-between">
+                <label htmlFor="prompt-template" className={labelCls}>ポジティブプロンプトテンプレート</label>
+                <button
+                  type="button"
+                  onClick={savePromptTemplate}
+                  disabled={templateDraft === promptTemplate}
+                  className="shrink-0 border px-2.5 py-1 text-xs font-medium rounded-[var(--radius)] disabled:opacity-40"
+                  style={{
+                    color: "var(--accent-text)",
+                    backgroundColor: "var(--accent)",
+                    borderColor: "var(--accent)",
+                  }}
+                >
+                  テンプレート保存
+                </button>
+              </div>
+              <textarea
+                id="prompt-template"
+                aria-label="ポジティブプロンプトテンプレート"
+                value={templateDraft}
+                onChange={(e) => setTemplateDraft(e.target.value)}
+                className={`${inputCls} resize-none ${MONO}`}
+                style={{ height: "5.5rem" }}
+              />
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                %prompt% にプロンプト本文が入り、%ラベル:最小:最大:ステップ:初期値% は画風パネルのスライダーになります。テンプレートを保存すると、数値パラメータは初期値に戻ります。
+              </p>
+            </div>
             <div className="grid gap-2">
               <div>
                 <label htmlFor="negative-prompt" className={labelCls}>ネガティブプロンプト</label>
@@ -5696,7 +6016,7 @@ export function App() {
               </div>
 
               <details>
-                <summary className="cursor-pointer text-sm font-medium py-1">詳細設定（Steps / CFG / サンプラー / スケジューラ）</summary>
+                <summary className="cursor-pointer text-sm font-medium py-1">詳細設定（Steps / CFG / サンプラー / スケジューラ / inpaint 等）</summary>
                 <div className="mt-1 grid grid-cols-2 gap-2">
                   <div>
                     <label htmlFor="steps" className="block text-xs text-[var(--dim)] mb-1">Steps</label>
@@ -5723,6 +6043,51 @@ export function App() {
                     </select>
                   </div>
                 </div>
+                {/* The payload's formerly fixed values: every key
+                    the client puts in the payload is now set here. */}
+                <div className="mt-2 grid gap-2">
+                  <SegmentedSetting
+                    label="生成後にモデルを元に戻す（override_settings_restore_afterwards）"
+                    options={[
+                      { key: "on", label: "戻す" },
+                      { key: "off", label: "戻さない" },
+                    ]}
+                    value={restoreAfterwards ? "on" : "off"}
+                    onPick={(k) => { markSettingsImmediate(); setRestoreAfterwards(k === "on"); }}
+                  />
+                  <SegmentedSetting
+                    label="inpaint の処理範囲（inpaint_full_res）"
+                    options={[
+                      { key: "whole", label: "全体（Whole picture）" },
+                      { key: "masked", label: "マスク周辺のみ（Only masked）" },
+                    ]}
+                    value={inpaintFullRes ? "masked" : "whole"}
+                    onPick={(k) => { markSettingsImmediate(); setInpaintFullRes(k === "masked"); }}
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label htmlFor="inpainting-fill" className="block text-xs text-[var(--dim)] mb-1">inpaint の埋め方（inpainting_fill）</label>
+                      <select id="inpainting-fill" value={inpaintingFill} onChange={(e) => { markSettingsImmediate(); setInpaintingFill(Number(e.target.value)); }} className={inputCls}>
+                        <option value={0}>fill</option>
+                        <option value={1}>original</option>
+                        <option value={2}>latent noise</option>
+                        <option value={3}>latent nothing</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="inpaint-full-res-padding" className="block text-xs text-[var(--dim)] mb-1">Only masked の余白 px（inpaint_full_res_padding）</label>
+                      <input id="inpaint-full-res-padding" inputMode="numeric" value={inpaintFullResPadding} onChange={(e) => setInpaintFullResPadding(e.target.value)} onBlur={flushSettingsSave} className={`${inputCls} ${MONO}`} />
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={resetModelSettings}
+                  className="mt-3 w-full border px-3 py-2 text-sm font-medium rounded-[var(--radius)]"
+                  style={{ color: "var(--err)", borderColor: "var(--err)", backgroundColor: "var(--surface)" }}
+                >
+                  選択中のモデルのパラメータをデフォルトに戻す
+                </button>
               </details>
 
             </div>
