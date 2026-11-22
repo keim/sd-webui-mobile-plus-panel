@@ -1011,7 +1011,29 @@ function parseSettingsBundle(saved: Record<string, unknown>): {
       }
     }
   } else if (Object.keys(saved).length > 0) {
-    records[model] = restoredRecord(saved, defaultSettingsFor(model));
+    const rec = restoredRecord(saved, defaultSettingsFor(model));
+    // Legacy saves predate templates: their photorealistic /
+    // comiclo weights become the values of the default template's
+    // parameters, so a tuned weight survives the migration
+    // instead of snapping back to the defaults.
+    if (rec.promptTemplate === DEFAULT_TEMPLATES[model]) {
+      const labels = new Set(
+        parseTemplateParams(rec.promptTemplate).map((p) => p.label),
+      );
+      const tv = { ...rec.templateValues };
+      const pw = savedString(saved.photorealisticWeight);
+      if (pw != null && labels.has("写実的")) {
+        const n = Number(pw);
+        if (Number.isFinite(n)) tv["写実的"] = n;
+      }
+      const cw = savedString(saved.comicloWeight);
+      if (cw != null && labels.has("コミック調")) {
+        const n = Number(cw);
+        if (Number.isFinite(n)) tv["コミック調"] = n;
+      }
+      rec.templateValues = tv;
+    }
+    records[model] = rec;
   }
   return { model, records };
 }
