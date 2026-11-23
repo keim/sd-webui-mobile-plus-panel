@@ -3092,25 +3092,38 @@ export function App() {
 
   // Applies one model's parameter record to the live form (the
   // startup restore, model switching, and the reset button all
-  // go through here).
-  function applySettingsRecord(nextSettings: SettingsSnapshot) {
+  // go through here). The image size (sizeKey / width / height /
+  // pixelSize / blockSize), the generation mode
+  // (img2imgChecked), the resize mode, and the seed method
+  // (seedMode + the fixed seed value) are NOT per-model
+  // parameters (keim, 2026-11-23): with skipGlobal they are
+  // left as-is, so switching models or resetting a model never
+  // moves them. Only the startup restore applies them (from
+  // the last-active model's record, which the save flow keeps
+  // current).
+  function applySettingsRecord(
+    nextSettings: SettingsSnapshot,
+    opts?: { skipGlobal?: boolean },
+  ) {
     setPromptTemplate(nextSettings.promptTemplate);
     setTemplateDraft(nextSettings.promptTemplate);
     setTemplateValues(nextSettings.templateValues);
-    setSizeKey(nextSettings.sizeKey);
-    setWidth(nextSettings.width);
-    setHeight(nextSettings.height);
-    setPixelSize(nextSettings.pixelSize);
-    setBlockSize(nextSettings.blockSize);
-    setSeedMode(nextSettings.seedMode);
-    setSeedText(nextSettings.seedText);
+    if (!opts?.skipGlobal) {
+      setSizeKey(nextSettings.sizeKey);
+      setWidth(nextSettings.width);
+      setHeight(nextSettings.height);
+      setPixelSize(nextSettings.pixelSize);
+      setBlockSize(nextSettings.blockSize);
+      setImg2imgChecked(nextSettings.img2imgChecked);
+      setResizeMode(nextSettings.resizeMode);
+      setSeedMode(nextSettings.seedMode);
+      setSeedText(nextSettings.seedText);
+    }
     setSteps(nextSettings.steps);
     setCfg(nextSettings.cfg);
     setSampler(nextSettings.sampler);
     setScheduler(nextSettings.scheduler);
-    setImg2imgChecked(nextSettings.img2imgChecked);
     setEditorDenoise(nextSettings.denoisingStrength);
-    setResizeMode(nextSettings.resizeMode);
     setMaskMode(nextSettings.maskMode);
     setMaskBlur(nextSettings.maskBlur);
     setBrushSize(nextSettings.brushSize);
@@ -3129,18 +3142,24 @@ export function App() {
     // incoming model's last-used record — its defaults on first
     // use. (This replaces the old behavior of reseeding the
     // recipe + style presets on every selection; those presets
-    // now live in defaultSettingsFor.)
+    // now live in defaultSettingsFor.) The image size, the
+    // generation mode, the resize mode, and the seed method are
+    // excluded from the per-model memory: they stay exactly as
+    // they are across the switch.
     setByModel((prev) => ({ ...prev, [model]: liveSnapshot }));
     setModel(key);
-    applySettingsRecord(byModel[key] ?? defaultSettingsFor(key));
+    applySettingsRecord(byModel[key] ?? defaultSettingsFor(key), {
+      skipGlobal: true,
+    });
   }
 
   // The Parameter pane's reset button: the selected model's
   // parameters back to its defaults. Other models' records are
-  // untouched.
+  // untouched, and so are the image size and the mode (not
+  // per-model parameters).
   function resetModelSettings() {
     markSettingsImmediate();
-    applySettingsRecord(defaultSettingsFor(model));
+    applySettingsRecord(defaultSettingsFor(model), { skipGlobal: true });
   }
 
   // The template editor's save button: commit the draft as the
@@ -6254,18 +6273,20 @@ export function App() {
                 {/* The payload's formerly fixed values: every key
                     the client puts in the payload is now set here. */}
                 <div className="mt-2 grid gap-2">
-                  <ToggleSetting
-                    label="生成後にモデルを元に戻す"
-                    stateLabel={restoreAfterwards ? "戻す" : "戻さない"}
-                    active={restoreAfterwards}
-                    onToggle={() => { markSettingsImmediate(); setRestoreAfterwards(!restoreAfterwards); }}
-                  />
-                  <ToggleSetting
-                    label="inpaint の処理範囲"
-                    stateLabel={inpaintFullRes ? "マスク周辺のみ" : "全体"}
-                    active={inpaintFullRes}
-                    onToggle={() => { markSettingsImmediate(); setInpaintFullRes(!inpaintFullRes); }}
-                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <ToggleSetting
+                      label="生成後にモデルを元に戻す"
+                      stateLabel={restoreAfterwards ? "戻す" : "戻さない"}
+                      active={restoreAfterwards}
+                      onToggle={() => { markSettingsImmediate(); setRestoreAfterwards(!restoreAfterwards); }}
+                    />
+                    <ToggleSetting
+                      label="inpaint の処理範囲"
+                      stateLabel={inpaintFullRes ? "マスク周辺のみ" : "全体"}
+                      active={inpaintFullRes}
+                      onToggle={() => { markSettingsImmediate(); setInpaintFullRes(!inpaintFullRes); }}
+                    />
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label htmlFor="inpainting-fill" className="block text-xs text-[var(--dim)] mb-1">inpaint の埋め方</label>
