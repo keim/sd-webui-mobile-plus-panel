@@ -191,7 +191,7 @@ function modelShortLabel(key: string | null): string {
 //   %prompt%                  -> the prompt area's text, as-is
 //   %label:min:max:step:def%  -> a numeric parameter; one slider
 //                                per parameter appears in the
-//                                style （画風） popup, and the
+//                                style （調整） popup, and the
 //                                token is replaced by its value
 // Any other %...% token is left in the text untouched.
 type TemplateParam = {
@@ -3929,6 +3929,9 @@ export function App() {
           // outside (the former "not masked") → 1.
           invert: maskMode === "not masked" ? 1 : 0,
         };
+        // The record mirrors the payload: inpaint's resize is
+        // Crop regardless of the panel selection.
+        if (i2i) i2i.resizeMode = 1;
       }
     }
     // Compose the complete sdapi payload here in the client (the
@@ -3975,9 +3978,11 @@ export function App() {
       }
       payload.init_images = [initB64];
       payload.denoising_strength = i2i.denoisingStrength;
-      // The panel's resize selection now applies to inpaint too —
-      // nothing is fixed on the worker side anymore.
-      payload.resize_mode = resizeMode;
+      // Inpaint always resizes with Crop (resize_mode 1) — the
+      // panel's resize cell shows Crop and is disabled while the
+      // mode is inpaint (keim, 2026-11-23). Plain img2img uses
+      // the panel's selection.
+      payload.resize_mode = mask ? 1 : resizeMode;
       payload.include_init_images = false;
       if (mask) {
         payload.mask = mask.data;
@@ -4979,7 +4984,7 @@ export function App() {
       </p>
     </div>
   ) : editorPopup === "style" ? (
-    <div className={popupPanelCompactCls} role="dialog" aria-label="画風設定">
+    <div className={popupPanelCompactCls} role="dialog" aria-label="調整設定">
       {styleParams.length === 0 ? (
         <p className="text-sm text-[var(--dim)]">
           テンプレートに数値パラメータがありません。
@@ -5594,7 +5599,8 @@ export function App() {
                   aria-haspopup="dialog"
                   aria-expanded={editorPopup === "denoise"}
                   onClick={() => toggleEditorPopup("denoise")}
-                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  disabled={!img2imgChecked}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0 disabled:opacity-40"
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">デノイズ</span>
@@ -5606,11 +5612,12 @@ export function App() {
                   aria-haspopup="dialog"
                   aria-expanded={editorPopup === "resize"}
                   onClick={() => toggleEditorPopup("resize")}
-                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  disabled={!img2imgChecked || maskPainted}
+                  className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0 disabled:opacity-40"
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">リサイズ</span>
-                  <span className="text-sm font-semibold leading-tight">{RESIZE_MODES[resizeMode]?.label}</span>
+                  <span className="text-sm font-semibold leading-tight">{img2imgChecked && maskPainted ? "Crop" : RESIZE_MODES[resizeMode]?.label}</span>
                 </button>
                 <button
                   type="button"
@@ -5635,14 +5642,14 @@ export function App() {
                 </button>
                 <button
                   type="button"
-                  aria-label="画風設定"
+                  aria-label="調整設定"
                   aria-haspopup="dialog"
                   aria-expanded={editorPopup === "style"}
                   onClick={() => toggleEditorPopup("style")}
                   className="flex flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
                 >
-                  <span className="text-[10px] leading-tight text-[var(--dim)]">画風</span>
+                  <span className="text-[10px] leading-tight text-[var(--dim)]">調整</span>
                   <span className={`text-sm font-semibold leading-tight ${MONO}`}>{styleParams.length > 0 ? `(${styleParams.map((p) => formatTemplateValue(templateValues[p.label] ?? p.def, p.step)).join(", ")})` : "なし"}</span>
                 </button>
                 <span
@@ -6081,7 +6088,7 @@ export function App() {
                 style={{ height: "5.5rem" }}
               />
               <p className="mt-1 text-xs text-[var(--dim)]">
-                %prompt% にプロンプト本文が入り、%ラベル:最小:最大:ステップ:初期値% は画風パネルのスライダーになります。テンプレートを保存すると、数値パラメータは初期値に戻ります。
+                %prompt% にプロンプト本文が入り、%ラベル:最小:最大:ステップ:初期値% は調整パネルのスライダーになります。テンプレートを保存すると、数値パラメータは初期値に戻ります。
               </p>
             </div>
             <div className="grid gap-2">
@@ -6418,7 +6425,7 @@ export function App() {
                       </div>
                     )}
                     <div className="flex gap-2">
-                      <dt className="text-[var(--dim)] shrink-0">画風</dt>
+                      <dt className="text-[var(--dim)] shrink-0">調整</dt>
                       <dd className="break-all">
                         {selected.photorealisticWeight == null && selected.comicloWeight == null
                           ? "未記録"
@@ -6761,6 +6768,12 @@ export function App() {
                     <div className="flex gap-2"><dt className="text-[var(--dim)] shrink-0">サイズ</dt><dd>{fmtBytes(selectedUpload.byteSize)}</dd></div>
                     <div className="flex gap-2"><dt className="text-[var(--dim)] shrink-0">アップ時刻</dt><dd>{fmtTime(selectedUpload.createdAt)}</dd></div>
                   </dl>
+                  {selectedUpload.prompt && (
+                    <div className="mt-2">
+                      <div className="text-sm text-[var(--dim)]">ポジティブプロンプト</div>
+                      <p className="mt-0.5 whitespace-pre-wrap break-words text-sm">{selectedUpload.prompt}</p>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() => transferUploadToEditor(selectedUpload)}

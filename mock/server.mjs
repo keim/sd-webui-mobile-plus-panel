@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, copyFile, rm, readdir } from "node:fs/promises";
 import { join, extname } from "node:path";
+import { inflateSync } from "node:zlib";
 
 const PORT = Number(process.env.MOCK_PORT || 8899);
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -138,12 +139,59 @@ function jobView(j) {
     error: j.error, createdAt: j.createdAt, updatedAt: j.updatedAt,
   };
 }
+// The positive prompt embedded in a PNG's WebUI infotext —
+// mirrors _extract_png_prompt in the extension backend.
+function extractPngPrompt(bytes) {
+  const texts = {};
+  let pos = 8;
+  while (pos + 8 <= bytes.length) {
+    const length = bytes.readUInt32BE(pos);
+    const type = bytes.toString("latin1", pos + 4, pos + 8);
+    const chunk = bytes.subarray(pos + 8, pos + 8 + length);
+    if (chunk.length < length) break;
+    pos += 8 + length + 4;
+    if (type === "IEND") break;
+    try {
+      if (type === "tEXt") {
+        const i = chunk.indexOf(0);
+        texts[chunk.toString("latin1", 0, i)] = chunk.toString("utf8", i + 1);
+      } else if (type === "zTXt") {
+        const i = chunk.indexOf(0);
+        if (chunk[i + 1] === 0) {
+          texts[chunk.toString("latin1", 0, i)] =
+            inflateSync(chunk.subarray(i + 2)).toString("utf8");
+        }
+      } else if (type === "iTXt") {
+        const i = chunk.indexOf(0);
+        const compressed = chunk[i + 1];
+        let rest = chunk.subarray(i + 3);
+        rest = rest.subarray(rest.indexOf(0) + 1);
+        let text = rest.subarray(rest.indexOf(0) + 1);
+        if (compressed === 1) text = inflateSync(text);
+        texts[chunk.toString("utf8", 0, i)] = text.toString("utf8");
+      }
+    } catch { /* skip malformed chunks */ }
+  }
+  if (texts.parameters) {
+    const lines = texts.parameters.split("\n");
+    if (lines.length && lines[lines.length - 1].startsWith("Steps: ")) lines.pop();
+    const out = [];
+    for (const line of lines) {
+      if (line.startsWith("Negative prompt:")) break;
+      out.push(line);
+    }
+    return out.join("\n").trim() || null;
+  }
+  if (texts.prompt) return texts.prompt.trim() || null;
+  return null;
+}
 function uploadView(u) {
   return {
     id: u.id, fileName: u.fileName, storedName: u.storedName,
     mimeType: u.mimeType, byteSize: u.byteSize,
     imageUrl: fileUrl(u.imageKey),
     displayUrl: fileUrl(u.displayKey || u.imageKey),
+    prompt: u.prompt ?? null,
     createdAt: u.createdAt,
   };
 }
@@ -382,6 +430,7 @@ const ACTIONS = {
       id, fileName: args.fileName || storedName, storedName,
       mimeType: args.mimeType || (isPng ? "image/png" : "image/jpeg"),
       byteSize: bytes.length, imageKey, displayKey,
+      prompt: isPng ? extractPngPrompt(bytes) : null,
       createdAt: nowIso(),
     });
     state.source = { kind: "upload", uploadId: id };

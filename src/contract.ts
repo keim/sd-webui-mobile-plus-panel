@@ -184,6 +184,10 @@ const uploadImageView = z.object({
   byteSize: z.number(),
   imageUrl: z.string().nullable(),
   displayUrl: z.string().nullable(),
+  // The positive prompt extracted from a PNG's embedded WebUI
+  // infotext at upload time; null for JPEGs and metadata-less
+  // PNGs.
+  prompt: z.string().nullable(),
   createdAt: z.string(),
 });
 
