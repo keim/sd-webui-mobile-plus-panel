@@ -294,43 +294,35 @@ async function fetchImageAsBase64(url: string): Promise<string> {
   return comma >= 0 ? dataUrl.slice(comma + 1) : "";
 }
 
-// A labelled segmented choice in the Parameter pane's style (the
-// seed-mode selector's shape): one row of options, the active one
-// filled with the accent color.
-function SegmentedSetting(props: {
+// A labelled single-button toggle in the Parameter pane
+// (keim, 2026-11-23): the button shows the current state's
+// label and flips the value on tap; the accent fill marks the
+// active (true) state, matching the mode toggle cell.
+function ToggleSetting(props: {
   label: string;
-  options: { key: string; label: string }[];
-  value: string;
-  onPick: (key: string) => void;
+  stateLabel: string;
+  active: boolean;
+  onToggle: () => void;
 }) {
   return (
     <div>
       <span className="block text-xs text-[var(--dim)] mb-1">{props.label}</span>
-      <div
-        className="flex border border-[var(--border)]"
-        role="group"
+      <button
+        type="button"
         aria-label={props.label}
+        aria-pressed={props.active}
+        onClick={props.onToggle}
+        className={`w-full border border-[var(--border)] px-2 py-2 text-sm ${
+          props.active ? "" : "bg-[var(--surface)]"
+        }`}
+        style={
+          props.active
+            ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+            : {}
+        }
       >
-        {props.options.map((o, i) => (
-          <button
-            key={o.key}
-            type="button"
-            aria-pressed={props.value === o.key}
-            onClick={() => props.onPick(o.key)}
-            className={`flex-1 px-2 py-2 text-sm ${
-              props.value === o.key ? "" : "bg-[var(--surface)]"
-            }`}
-            style={{
-              borderLeft: i > 0 ? "1px solid var(--border)" : undefined,
-              ...(props.value === o.key
-                ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
-                : {}),
-            }}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
+        {props.stateLabel}
+      </button>
     </div>
   );
 }
@@ -1834,7 +1826,7 @@ export function App() {
   >(() => templateParamDefaults(DEFAULT_TEMPLATES.wai));
   // The Parameter pane's template editor works on a draft; the
   // committed template above (and the numeric values' reset) only
-  // change when its テンプレート保存 button is pressed.
+  // change when its 更新 button is pressed.
   const [templateDraft, setTemplateDraft] = useState(
     DEFAULT_TEMPLATES.wai,
   );
@@ -6121,7 +6113,7 @@ export function App() {
               </button>
             </div>
             {/* Prompt template editor (per model): the draft is
-                committed by the テンプレート保存 button above the
+                committed by the 更新 button above the
                 textarea; committing a changed template resets the
                 numeric parameter values to the new template's
                 defaults. */}
@@ -6139,7 +6131,7 @@ export function App() {
                     borderColor: "var(--accent)",
                   }}
                 >
-                  テンプレート保存
+                  更新
                 </button>
               </div>
               <textarea
@@ -6147,12 +6139,9 @@ export function App() {
                 aria-label="ポジティブプロンプトテンプレート"
                 value={templateDraft}
                 onChange={(e) => setTemplateDraft(e.target.value)}
-                className={`${inputCls} resize-none ${MONO}`}
-                style={{ height: "5.5rem" }}
+                className={`${inputCls} resize-none`}
+                style={{ height: "7.5rem" }}
               />
-              <p className="mt-1 text-xs text-[var(--dim)]">
-                %prompt% にプロンプト本文が入り、%ラベル:最小:最大:ステップ:初期値% は調整パネルのスライダーになります。テンプレートを保存すると、数値パラメータは初期値に戻ります。
-              </p>
             </div>
             {/* Save index: browser-managed (see the state block at
                 the workspace query). Editing commits to the
@@ -6171,9 +6160,6 @@ export function App() {
                 onBlur={commitSaveIndex}
                 className={inputCls}
               />
-              <p className="mt-1 text-xs text-[var(--dim)]">
-                保存のたびに 1 増えて、保存ファイル名の先頭の番号になります。
-              </p>
             </div>
             <div className="grid gap-2">
               <div>
@@ -6187,9 +6173,6 @@ export function App() {
                   className={`${inputCls} resize-none`}
                   style={{ height: "7.5rem" }}
                 />
-                <p className="mt-1 text-xs text-[var(--dim)]">
-                  この内容がそのままネガティブとして使われます（z-image では空になります）。初期値は標準ネガティブです。
-                </p>
               </div>
 
               <div>
@@ -6241,7 +6224,7 @@ export function App() {
               </div>
 
               <details>
-                <summary className="cursor-pointer text-sm font-medium py-1">詳細設定（Steps / CFG / サンプラー / スケジューラ / inpaint 等）</summary>
+                <summary className="cursor-pointer text-sm font-medium py-1">詳細設定</summary>
                 <div className="mt-1 grid grid-cols-2 gap-2">
                   <div>
                     <label htmlFor="steps" className="block text-xs text-[var(--dim)] mb-1">Steps</label>
@@ -6271,36 +6254,30 @@ export function App() {
                 {/* The payload's formerly fixed values: every key
                     the client puts in the payload is now set here. */}
                 <div className="mt-2 grid gap-2">
-                  <SegmentedSetting
-                    label="生成後にモデルを元に戻す（override_settings_restore_afterwards）"
-                    options={[
-                      { key: "on", label: "戻す" },
-                      { key: "off", label: "戻さない" },
-                    ]}
-                    value={restoreAfterwards ? "on" : "off"}
-                    onPick={(k) => { markSettingsImmediate(); setRestoreAfterwards(k === "on"); }}
+                  <ToggleSetting
+                    label="生成後にモデルを元に戻す"
+                    stateLabel={restoreAfterwards ? "戻す" : "戻さない"}
+                    active={restoreAfterwards}
+                    onToggle={() => { markSettingsImmediate(); setRestoreAfterwards(!restoreAfterwards); }}
                   />
-                  <SegmentedSetting
-                    label="inpaint の処理範囲（inpaint_full_res）"
-                    options={[
-                      { key: "whole", label: "全体（Whole picture）" },
-                      { key: "masked", label: "マスク周辺のみ（Only masked）" },
-                    ]}
-                    value={inpaintFullRes ? "masked" : "whole"}
-                    onPick={(k) => { markSettingsImmediate(); setInpaintFullRes(k === "masked"); }}
+                  <ToggleSetting
+                    label="inpaint の処理範囲"
+                    stateLabel={inpaintFullRes ? "マスク周辺のみ" : "全体"}
+                    active={inpaintFullRes}
+                    onToggle={() => { markSettingsImmediate(); setInpaintFullRes(!inpaintFullRes); }}
                   />
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label htmlFor="inpainting-fill" className="block text-xs text-[var(--dim)] mb-1">inpaint の埋め方（inpainting_fill）</label>
+                      <label htmlFor="inpainting-fill" className="block text-xs text-[var(--dim)] mb-1">inpaint の埋め方</label>
                       <select id="inpainting-fill" value={inpaintingFill} onChange={(e) => { markSettingsImmediate(); setInpaintingFill(Number(e.target.value)); }} className={inputCls}>
-                        <option value={0}>fill</option>
-                        <option value={1}>original</option>
-                        <option value={2}>latent noise</option>
-                        <option value={3}>latent nothing</option>
+                        <option value={0}>塗りつぶし</option>
+                        <option value={1}>オリジナル</option>
+                        <option value={2}>潜在ノイズ</option>
+                        <option value={3}>潜在（空）</option>
                       </select>
                     </div>
                     <div>
-                      <label htmlFor="inpaint-full-res-padding" className="block text-xs text-[var(--dim)] mb-1">Only masked の余白 px（inpaint_full_res_padding）</label>
+                      <label htmlFor="inpaint-full-res-padding" className="block text-xs text-[var(--dim)] mb-1">マスク周辺のみの余白 px</label>
                       <input id="inpaint-full-res-padding" inputMode="numeric" value={inpaintFullResPadding} onChange={(e) => setInpaintFullResPadding(e.target.value)} onBlur={flushSettingsSave} className={`${inputCls} ${MONO}`} />
                     </div>
                   </div>
