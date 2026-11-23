@@ -2208,13 +2208,14 @@ export function App() {
         : "none";
   // The EDITOR image's own natural size, measured from its
   // original file (displayUrl can be the resized display JPEG).
-  // The name plate, the size-mismatch dot, and
-  // 「画像サイズをあわせる」 all describe the DISPLAYED image, so
-  // they use this — NOT maskNatural, which is the img2img
-  // SOURCE's size (the two slots are independent; using the
-  // source's size here showed the wrong dimensions whenever the
-  // displayed image differed from the source, and no size at all
-  // while no source was set — keim's report, 2026-11-23).
+  // The name plate describes the DISPLAYED image, so it uses
+  // this — NOT maskNatural, which is the img2img SOURCE's size
+  // (the two slots are independent; using the source's size for
+  // the plate showed the wrong dimensions whenever the
+  // displayed image differed from the source, and no size at
+  // all while no source was set — keim's report, 2026-11-23).
+  // The size-mismatch dot and 「画像サイズをあわせる」 are the
+  // opposite: they follow the SOURCE's size (maskNatural).
   const [editorNatural, setEditorNatural] = useState<{
     w: number;
     h: number;
@@ -3157,16 +3158,17 @@ export function App() {
   }
 
   // 「画像サイズをあわせる」 (bottom row of the size popup): sets
-  // the form's width/height to the displayed image's own pixel
-  // size (editorNatural), verbatim. Like a hand edit of the
-  // dimension inputs, both the aspect-ratio and pixel-count
-  // selections are cleared. The button is enabled only while
-  // sizeMismatch holds, so editorNatural is always set here.
+  // the form's width/height to the SOURCE image's own pixel
+  // size (maskNatural), verbatim — the size an img2img run
+  // starts from. Like a hand edit of the dimension inputs, both
+  // the aspect-ratio and pixel-count selections are cleared.
+  // The button is enabled only while sizeMismatch holds, so
+  // maskNatural is always set here.
   function applyImageSize() {
-    if (editorNatural == null) return;
+    if (maskNatural == null) return;
     markSettingsImmediate();
-    setWidth(String(editorNatural.w));
-    setHeight(String(editorNatural.h));
+    setWidth(String(maskNatural.w));
+    setHeight(String(maskNatural.h));
     setSizeKey(null);
     setPixelSize(null);
   }
@@ -4358,12 +4360,17 @@ export function App() {
         : "";
   // Size-mismatch dot for the footer size button: the form's
   // selected generation size (width × height) differs from the
-  // displayed image's own pixel size. No image (or its size not
-  // measured yet) — no dot.
+  // SOURCE image's own pixel size (maskNatural — the img2img
+  // init image sitting in the source area). The generation size
+  // matters against the source, so the dot and
+  // 「画像サイズをあわせる」 follow the source — NOT the
+  // displayed Editor image, whose own size is what the name
+  // plate shows (keim, 2026-11-23). No source image (or its
+  // size not measured yet) — no dot.
   const sizeMismatch =
-    editorHasImage &&
-    editorNatural != null &&
-    (Number(width) !== editorNatural.w || Number(height) !== editorNatural.h);
+    sourceImage.kind !== "none" &&
+    maskNatural != null &&
+    (Number(width) !== maskNatural.w || Number(height) !== maskNatural.h);
   // The two-line name plate (file name on line 1, the image's
   // own "（{width} x {height}）" pixel size on line 2). Shown by
   // the Editor image display only, flush in its top-left corner —
@@ -6934,11 +6941,12 @@ export function App() {
                 >
                   {/* No title row. The popup's bottom row is the
                       「画像サイズをあわせる」 button: enabled only
-                      while the displayed image's own pixel size
+                      while the SOURCE image's own pixel size
                       differs from the form's width/height
                       (sizeMismatch — the same condition that shows
                       the size button's corner dot); pressing it
-                      adopts the image's dimensions verbatim. */}
+                      adopts the source image's dimensions
+                      verbatim. */}
                   <div className="min-h-0 overflow-y-auto">{sizeSettings}</div>
                   <button
                     type="button"
@@ -6995,11 +7003,11 @@ export function App() {
                 </span>
               )}
               {/* Size-mismatch dot (top-right corner): shown
-                  only while an image is displayed whose own
+                  only while a SOURCE image is set whose own
                   pixel size differs from the size selected
                   here — a quiet hint that generating at the
-                  current size would not match the image on
-                  screen (e.g. as an img2img init). */}
+                  current size would not match the img2img
+                  init image in the source area. */}
               {sizeMismatch && (
                 <span
                   aria-hidden="true"
