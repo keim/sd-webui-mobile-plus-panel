@@ -2206,6 +2206,41 @@ export function App() {
       : editorSource.kind === "upload"
         ? `upload:${editorSource.uploadId ?? editorSource.fileName ?? ""}:${editorSource.byteSize ?? ""}`
         : "none";
+  // The EDITOR image's own natural size, measured from its
+  // original file (displayUrl can be the resized display JPEG).
+  // The name plate, the size-mismatch dot, and
+  // 「画像サイズをあわせる」 all describe the DISPLAYED image, so
+  // they use this — NOT maskNatural, which is the img2img
+  // SOURCE's size (the two slots are independent; using the
+  // source's size here showed the wrong dimensions whenever the
+  // displayed image differed from the source, and no size at all
+  // while no source was set — keim's report, 2026-11-23).
+  const [editorNatural, setEditorNatural] = useState<{
+    w: number;
+    h: number;
+  } | null>(null);
+  const editorNaturalIdentityRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (editorNaturalIdentityRef.current === editorSourceIdentity) return;
+    editorNaturalIdentityRef.current = editorSourceIdentity;
+    const url = editorSource.imageUrl ?? editorSource.displayUrl;
+    if (editorSource.kind === "none" || !url) {
+      setEditorNatural(null);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        setEditorNatural({ w: img.naturalWidth, h: img.naturalHeight });
+      }
+    };
+    img.src = url;
+    return () => {
+      cancelled = true;
+    };
+  }, [editorSourceIdentity, editorSource]);
   const sourceIdentity =
     sourceImage.kind === "job"
       ? `job:${sourceImage.jobId}`
@@ -3123,15 +3158,15 @@ export function App() {
 
   // 「画像サイズをあわせる」 (bottom row of the size popup): sets
   // the form's width/height to the displayed image's own pixel
-  // size (maskNatural), verbatim. Like a hand edit of the
+  // size (editorNatural), verbatim. Like a hand edit of the
   // dimension inputs, both the aspect-ratio and pixel-count
   // selections are cleared. The button is enabled only while
-  // sizeMismatch holds, so maskNatural is always set here.
+  // sizeMismatch holds, so editorNatural is always set here.
   function applyImageSize() {
-    if (maskNatural == null) return;
+    if (editorNatural == null) return;
     markSettingsImmediate();
-    setWidth(String(maskNatural.w));
-    setHeight(String(maskNatural.h));
+    setWidth(String(editorNatural.w));
+    setHeight(String(editorNatural.h));
     setSizeKey(null);
     setPixelSize(null);
   }
@@ -4270,8 +4305,9 @@ export function App() {
   //   upload — and line 2 is the displayed image's own pixel
   //   dimensions as "（{width} x {height}）" — full-width
   //   parentheses, width × height order, half-width spaces
-  //   around the x (the natural size the mask is sized
-  //   from). Display only (pointer-events none), so it never
+  //   around the x (editorNatural: the displayed image's own
+  //   measured size, independent of the img2img source slot).
+  //   Display only (pointer-events none), so it never
   //   blocks the area tap.
   // - while an image is shown — a generated job's OR an
   //   upload's — three bordered, rounded square buttons overlap
@@ -4321,8 +4357,8 @@ export function App() {
   // measured yet) — no dot.
   const sizeMismatch =
     editorHasImage &&
-    maskNatural != null &&
-    (Number(width) !== maskNatural.w || Number(height) !== maskNatural.h);
+    editorNatural != null &&
+    (Number(width) !== editorNatural.w || Number(height) !== editorNatural.h);
   // The two-line name plate (file name on line 1, the image's
   // own "（{width} x {height}）" pixel size on line 2). Shown by
   // the Editor image display only, flush in its top-left corner —
@@ -4336,9 +4372,9 @@ export function App() {
       <span className="block truncate text-[10px] leading-tight">
         {editorImageName}
       </span>
-      {maskNatural && (
+      {editorNatural && (
         <span className={`block truncate text-[10px] leading-tight ${MONO}`}>
-          {`（${maskNatural.w} x ${maskNatural.h}）`}
+          {`（${editorNatural.w} x ${editorNatural.h}）`}
         </span>
       )}
     </div>
