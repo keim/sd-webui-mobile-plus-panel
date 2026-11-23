@@ -241,7 +241,19 @@ export const Actions = {
   },
   getWorkspaceState: {
     request: z.object({}),
-    response: z.object({ settings: z.string(), prompt: z.string() }),
+    response: z.object({
+      settings: z.string(),
+      prompt: z.string(),
+      // The server's latest save index — the client's initial
+      // value at startup (the counter itself is client-managed).
+      saveIndex: z.number(),
+    }),
+  },
+  setSaveIndex: {
+    request: z.object({
+      index: z.number().int().min(0).max(999999999),
+    }),
+    response: okResponse,
   },
   saveSettings: {
     request: z.object({
@@ -299,6 +311,10 @@ export const Actions = {
   saveUploadImage: {
     request: z.object({
       uploadId: z.number().int().positive(),
+      // The client-managed save index (already incremented by
+      // the client); the server names the file with it verbatim
+      // and remembers it as the latest.
+      index: z.number().int().min(0),
     }),
     response: saveImageResponse,
   },
@@ -348,6 +364,7 @@ export const Actions = {
   saveJobImage: {
     request: z.object({
       jobId: z.number().int().positive(),
+      index: z.number().int().min(0),
     }),
     response: saveImageResponse,
   },

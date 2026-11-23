@@ -100,7 +100,8 @@ async function seed() {
     await copyFixtureTo(`${job.sample}.display.jpg`, job.displayKey);
   }
   // One listed save (from job 1) plus the unlisted 12719-0 seed file,
-  // so the filename-max counter hands out 12720 like production.
+  // so the stored save index seeds to 12719 like production and the
+  // client's first save becomes 12720.
   await copyFixtureTo("sample-1.png", "saved/12713-3035825825.png");
   await copyFixtureTo("sample-1.display.jpg", "saved/12713-3035825825.display.jpg");
   await copyFixtureTo("sample-2.png", "saved/12719-0.png");
@@ -353,8 +354,11 @@ function jobProgress(job) {
   };
 }
 
-// --- save counter (SD WebUI style: filename max + 1) ----------------------
-async function claimSaveCounter() {
+// --- save index (client-managed; mirrors the backend) ---------------------
+// The server only remembers the latest index it received and
+// hands it back at startup; the seed scan below runs once, on
+// first read, so the sequence continues from the saved files.
+async function scanSavedHighest() {
   let names = [];
   try {
     names = await readdir(join(FILES, "saved"));
@@ -366,7 +370,17 @@ async function claimSaveCounter() {
     const m = name.match(/^(\d+)-\d+\.(?:png|jpg)$/);
     if (m) max = Math.max(max ?? 0, Number(m[1]));
   }
-  return max === null ? 12713 : max + 1;
+  return max;
+}
+async function storedSaveIndex() {
+  if (state.saveIndex == null) {
+    state.saveIndex = (await scanSavedHighest()) ?? 0;
+  }
+  return state.saveIndex;
+}
+async function indexFromArgs(args) {
+  if (Number.isInteger(args.index) && args.index >= 0) return args.index;
+  return (await storedSaveIndex()) + 1;
 }
 
 // --- actions ---------------------------------------------------------------
@@ -383,7 +397,15 @@ const ACTIONS = {
   getWorkspaceState: async () => ({
     settings: state.settings,
     prompt: state.prompt,
+    saveIndex: await storedSaveIndex(),
   }),
+  setSaveIndex: async (args) => {
+    if (!Number.isInteger(args.index) || args.index < 0 || args.index > 999999999) {
+      return { ok: false, error: "保存インデクスは 0 以上の整数で指定してください。" };
+    }
+    state.saveIndex = args.index;
+    return { ok: true, error: null };
+  },
   saveSettings: async (args) => {
     state.settings = String(args.settings ?? "");
     return { ok: true };
@@ -470,7 +492,8 @@ const ACTIONS = {
     if (!upload) {
       return { ok: false, error: "アップロード画像が見つかりません。", name: null, counter: null, seed: null };
     }
-    const counter = await claimSaveCounter();
+    const counter = await indexFromArgs(args);
+    state.saveIndex = counter;
     const ext = upload.imageKey.endsWith(".png") ? "png" : "jpg";
     const imageKey = `saved/${counter}-0.${ext}`;
     await putFile(imageKey, await readFile(join(FILES, upload.imageKey)));
@@ -588,7 +611,8 @@ const ACTIONS = {
     if (!job || job.status !== "completed" || !job.imageKey) {
       return { ok: false, error: "生成ジョブが見つかりません。", name: null, counter: null, seed: null };
     }
-    const counter = await claimSaveCounter();
+    const counter = await indexFromArgs(args);
+    state.saveIndex = counter;
     const seed = job.resultSeed ?? 0;
     const imageKey = `saved/${counter}-${seed}.png`;
     await putFile(imageKey, await readFile(join(FILES, job.imageKey)));

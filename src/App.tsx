@@ -1914,6 +1914,47 @@ export function App() {
     queryFn: () => api.getWorkspaceState({}),
   });
 
+  // The save index （保存インデクス） is managed HERE, in the
+  // browser (keim, 2026-11-23): it starts from the server's
+  // latest value (getWorkspaceState.saveIndex, applied once by
+  // the restore effect), each save increments it and passes the
+  // new value to the save action — which names the file with it
+  // and remembers it as the server's latest — and the Parameter
+  // pane edits it directly (「現在の保存インデクス値」), with
+  // edits committed to the server via setSaveIndex so they
+  // survive restarts. It is NOT part of the per-model settings.
+  const [saveIndexText, setSaveIndexText] = useState("");
+  const saveIndexRef = useRef<number | null>(null);
+  function nextSaveIndex(): number {
+    const base =
+      saveIndexRef.current ?? workspaceQuery.data?.saveIndex ?? 0;
+    const next = base + 1;
+    saveIndexRef.current = next;
+    setSaveIndexText(String(next));
+    return next;
+  }
+  function commitSaveIndex() {
+    const parsed = Number(saveIndexText);
+    if (
+      saveIndexText.trim() !== "" &&
+      Number.isInteger(parsed) &&
+      parsed >= 0 &&
+      parsed <= 999999999
+    ) {
+      if (parsed !== saveIndexRef.current) {
+        saveIndexRef.current = parsed;
+        void api.setSaveIndex({ index: parsed }).catch(() => {
+          // Best-effort: the local value still governs this
+          // session's saves, and the next successful save hands
+          // the server a newer value anyway.
+        });
+      }
+    } else if (saveIndexRef.current != null) {
+      // Invalid edit: revert the field to the current value.
+      setSaveIndexText(String(saveIndexRef.current));
+    }
+  }
+
   const liveSnapshot = settingsSnapshotOf({
     promptTemplate,
     templateValues,
@@ -2038,6 +2079,11 @@ export function App() {
     if (!data) return;
     if (standardNegativeQuery.data == null) return;
     restoredRef.current = true;
+    // The save index starts from the server's latest value.
+    if (saveIndexRef.current == null && typeof data.saveIndex === "number") {
+      saveIndexRef.current = data.saveIndex;
+      setSaveIndexText(String(data.saveIndex));
+    }
     const bundle = parseSettingsBundle(parseJsonRecord(data.settings));
     if (bundle) {
       const currentRecord =
@@ -3518,9 +3564,9 @@ export function App() {
   });
 
   // Save a generation job's image into the saved-image area
-  // (saveJobImage): the server claims the next save-counter value,
-  // copies the original PNG into a dedicated blob, and records it
-  // under "{counter}-{seed}". Used by both save buttons — the
+  // (saveJobImage): the browser increments the save index and
+  // passes it along; the server copies the original PNG under
+  // "{index}-{seed}" and records it. Used by both save buttons — the
   // Editor image area's bottom-right button and the History
   // detail's button next to the PNG download. Same response-timeout
   // discipline as the deletes (the server re-reads a multi-megabyte
@@ -3537,7 +3583,10 @@ export function App() {
         );
       });
       try {
-        return await Promise.race([api.saveJobImage({ jobId }), timeout]);
+        return await Promise.race([
+          api.saveJobImage({ jobId, index: nextSaveIndex() }),
+          timeout,
+        ]);
       } finally {
         window.clearTimeout(timer);
       }
@@ -3607,9 +3656,9 @@ export function App() {
   });
 
   // Save an upload-library image into the saved-image area
-  // (saveUploadImage): the same counter mechanism as saveJobImage,
-  // with the seed fixed at 0 — the assigned name is
-  // "{counter}-0". Shares the save feedback state with saveImage.
+  // (saveUploadImage): the same save-index mechanism as
+  // saveJobImage, with the seed fixed at 0 — the assigned name
+  // is "{index}-0". Shares the save feedback state with saveImage.
   const saveUpload = useMutation({
     mutationFn: async (uploadId: number) => {
       let timer: number | undefined;
@@ -3620,7 +3669,10 @@ export function App() {
         );
       });
       try {
-        return await Promise.race([api.saveUploadImage({ uploadId }), timeout]);
+        return await Promise.race([
+          api.saveUploadImage({ uploadId, index: nextSaveIndex() }),
+          timeout,
+        ]);
       } finally {
         window.clearTimeout(timer);
       }
@@ -3851,9 +3903,11 @@ export function App() {
     }
     // Generation mode is decided by the mode toggle
     // (img2imgChecked), the source image, and the mask:
-    // - no source image → txt2img only (the toggle has no
-    //   i2i/inpaint side). From the Inpaint pane there is nothing
-    //   to paint on, so it stays a form error.
+    // - no source image: the txt2img side generates txt2img,
+    //   but with the i2i/inpaint side selected (or from the
+    //   Inpaint pane, which has nothing to paint on) it is a
+    //   form error — no silent txt2img fallback (keim,
+    //   2026-11-23).
     // - source image + toggle on the txt2img side → txt2img,
     //   even though an image is set (Editor). The Inpaint pane is
     //   the exception: it keeps its "generate with the target
@@ -3886,13 +3940,14 @@ export function App() {
     const useSourceImage =
       sourceImage.kind !== "none" && (img2imgChecked || tab === "inpaint");
     if (sourceImage.kind === "none") {
-      if (tab === "inpaint") {
+      if (tab === "inpaint" || img2imgChecked) {
         setFormError(
           "元画像がセットされていません。元画像エリアで画像をアップロードするか、画像エリアの「元画像に採用」で表示中の画像を元画像にしてください。",
         );
         return null;
       }
-      // No source image: txt2img — i2i stays the default above.
+      // No source image and the txt2img side selected: txt2img
+      // — i2i stays the default above.
     } else if (!useSourceImage) {
       // Image set but the toggle is on the txt2img side (Editor):
       // txt2img — i2i stays the default above, and the denoise
@@ -4326,8 +4381,8 @@ export function App() {
   //   "{jobId}-{resultSeed}.png", for an upload the original
   //   blob under its original file name), save (copies the
   //   image into the saved-image area:
-  //   via saveJobImage under a "{counter}-{seed}" name for a
-  //   job, via saveUploadImage under "{counter}-0" for an
+  //   via saveJobImage under a "{index}-{seed}" name for a
+  //   job, via saveUploadImage under "{index}-0" for an
   //   upload; the assigned name is shown briefly as save
   //   feedback overlaid at the area's bottom-left), and delete
   //   (opens the editor-delete confirmation; a job is deleted
@@ -4799,8 +4854,9 @@ export function App() {
   // buildJobArgs). The toggle is enabled with no image set:
   // switching to the i2i side reveals the source image area in
   // the prompt row, whose tap uploads the source. Generation
-  // itself still falls back to txt2img while no source image is
-  // set. The i2i side is shown in the accent fill (the
+  // with the i2i side selected but no source image set is a
+  // form error, not a silent txt2img fallback (keim,
+  // 2026-11-23). The i2i side is shown in the accent fill (the
   // active-family signal, matching the image area's thick frame
   // while a source image is set); the txt2img side stays plain.
   // Automatic switches to the i2i side: uploading, and a user
@@ -5657,7 +5713,7 @@ export function App() {
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">調整</span>
-                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{styleParams.length > 0 ? `(${styleParams.map((p) => formatTemplateValue(templateValues[p.label] ?? p.def, p.step)).join(", ")})` : "なし"}</span>
+                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{styleParams.length > 0 ? `${styleParams.map((p) => formatTemplateValue(templateValues[p.label] ?? p.def, p.step)).join(",")}` : "なし"}</span>
                 </button>
                 <span
                   aria-hidden="true"
@@ -6096,6 +6152,27 @@ export function App() {
               />
               <p className="mt-1 text-xs text-[var(--dim)]">
                 %prompt% にプロンプト本文が入り、%ラベル:最小:最大:ステップ:初期値% は調整パネルのスライダーになります。テンプレートを保存すると、数値パラメータは初期値に戻ります。
+              </p>
+            </div>
+            {/* Save index: browser-managed (see the state block at
+                the workspace query). Editing commits to the
+                server on blur via setSaveIndex. Not a per-model
+                setting — the reset button below does not touch
+                it. */}
+            <div className="mb-2">
+              <label htmlFor="save-index" className={labelCls}>現在の保存インデクス値</label>
+              <input
+                id="save-index"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                value={saveIndexText}
+                onChange={(e) => setSaveIndexText(e.target.value)}
+                onBlur={commitSaveIndex}
+                className={inputCls}
+              />
+              <p className="mt-1 text-xs text-[var(--dim)]">
+                保存のたびに 1 増えて、保存ファイル名の先頭の番号になります。
               </p>
             </div>
             <div className="grid gap-2">
