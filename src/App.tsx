@@ -3152,6 +3152,14 @@ export function App() {
     (undoState.index >= 0 && prompt !== undoState.entries[undoState.index]);
   const canRedo = undoState.index < undoState.entries.length - 1;
 
+  // Select all (the auxiliary panel's 全選択 button, bottom-right
+  // cell): selects the whole prompt text through focusPrompt, so
+  // the selection state and the candidate row follow like any
+  // other panel operation.
+  function onSelectAllPrompt() {
+    focusPrompt(0, prompt.length);
+  }
+
   // Port of WordOperations._selectCurrentWord.
   function selectCurrentWordRange(): { start: number; end: number } {
     const cursor = matchWordAtPosition(prompt, selStart);
@@ -5565,7 +5573,7 @@ export function App() {
             prompt is focused, the image area and the parameter
             panel are hidden and the prompt auxiliary panel
             (3 rows x 6 cols: word candidates / word operations /
-            定型文・Undo・Redo + 3 blank cells) shows instead;
+            定型文・Undo・Redo・全選択 + 2 blank cells) shows instead;
             defocus — or the software keyboard closing while the
             textarea is still focused (viewport-height detection,
             see the keyboard-close watcher near promptRef) —
@@ -5654,7 +5662,7 @@ export function App() {
 
             {/* --- auxiliary panel (focused only): 3 rows x 6 cols
                 (word candidates / word operations / 定型文・
-                Undo・Redo + 3 blank cells). --- */}
+                Undo・Redo・全選択 + 2 blank cells). --- */}
             {promptFocused && (
             <div
               className="grid grid-cols-6 border-t border-[var(--border)] bg-[var(--surface)]"
@@ -5759,8 +5767,9 @@ export function App() {
                 :+0.1
               </button>
               {/* Row 3: 定型文 / Undo / Redo (inherited from the
-                  abolished operation panel) + 3 blank cells that
-                  keep the seamless 6-column grid look. */}
+                  abolished operation panel) + 2 blank cells that
+                  keep the seamless 6-column grid look + 全選択 in
+                  the bottom-right cell. */}
               <button
                 type="button"
                 aria-label="定型文を開く"
@@ -5823,7 +5832,16 @@ export function App() {
               </button>
               <span aria-hidden="true" style={{ minHeight: "2rem", borderRight: "1px solid var(--border)", borderTop: "1px solid var(--border)" }} />
               <span aria-hidden="true" style={{ minHeight: "2rem", borderRight: "1px solid var(--border)", borderTop: "1px solid var(--border)" }} />
-              <span aria-hidden="true" style={{ minHeight: "2rem", borderTop: "1px solid var(--border)" }} />
+              <button
+                type="button"
+                aria-label="全選択"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onSelectAllPrompt}
+                className="bg-[var(--surface)] px-1 py-1.5 text-sm font-medium"
+                style={{ minHeight: "2rem", borderTop: "1px solid var(--border)" }}
+              >
+                全選択
+              </button>
             </div>
             )}
 
