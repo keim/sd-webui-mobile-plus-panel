@@ -189,10 +189,10 @@ const MODELS: {
 // Parameter pane. The three built-ins below correspond to the
 // former MODELS entries; MODELS itself now only seeds their
 // defaults (checkpoint + recipe values).
-const BUILTIN_TEMPLATES: { key: ModelKey; title: string; label: string }[] = [
-  { key: "wai", title: "WAI nsfw テンプレート", label: "WAI" },
-  { key: "pornmaster", title: "Pornmaster テンプレート", label: "PM" },
-  { key: "zimage", title: "Z-Image テンプレート", label: "ZIMG" },
+const BUILTIN_TEMPLATES: { key: ModelKey; title: string }[] = [
+  { key: "wai", title: "WAI nsfw テンプレート" },
+  { key: "pornmaster", title: "Pornmaster テンプレート" },
+  { key: "zimage", title: "Z-Image テンプレート" },
 ];
 
 function builtinOfTitle(title: string) {
@@ -207,7 +207,6 @@ function builtinOfTitle(title: string) {
 // Neo's per-request VAE / text-encoder selection).
 type TemplateRecord = {
   title: string;
-  label: string;
   model: string;
   negativePrompt: string;
   additionalModules?: string[];
@@ -660,16 +659,14 @@ async function fileToDisplayJpegBase64(file: File): Promise<string | null> {
   }
 }
 
-// Display label for a job record's model field. New records
-// carry the generation template's title; older ones carry a
-// model key. Built-ins resolve to their template label; anything
-// else (a user template's title) is shown as-is.
+// Display text for a job record's model field. New records
+// carry the generation template's title, shown as-is; older
+// ones carry a model key, resolved to its built-in template's
+// title.
 function modelLabel(key: string | null): string {
   if (key == null) return "";
-  const byTitle = builtinOfTitle(key);
-  if (byTitle) return byTitle.label;
   const byKey = BUILTIN_TEMPLATES.find((b) => b.key === key);
-  if (byKey) return byKey.label;
+  if (byKey) return byKey.title;
   return key;
 }
 
@@ -1021,137 +1018,56 @@ function builtinTemplate(key: ModelKey, standardNegative: string): TemplateRecor
   const recipe = MODELS.find((m) => m.key === key) ?? MODELS[0]!;
   return {
     title: meta.title,
-    label: meta.label,
     model: recipe.checkpoint,
     negativePrompt: key === "zimage" ? "" : standardNegative,
     settings: defaultSettingsFor(key),
   };
 }
 
-function defaultTemplates(standardNegative: string): TemplateRecord[] {
-  return BUILTIN_TEMPLATES.map((b) => builtinTemplate(b.key, standardNegative));
+// The common default template (keim, 2026-11-24): one set of
+// defaults for every model, used for a fresh install's single
+// template and by the Parameter pane's reset button. The image
+// size / seed / mode fields below are the app-wide initial
+// values (they are not template parameters; they only seed the
+// form on a fresh install's full apply).
+const DEFAULT_TEMPLATE_NEGATIVE =
+  "(worst quality, low quality, lowres: 1.5), bad anatomy, bad hands, missing fingers, extra digit, long neck, long body, missing arms, missing legs, extra arms, extra legs, watermark, text";
+
+function commonDefaultSettings(): SettingsSnapshot {
+  return settingsSnapshotOf({
+    promptTemplate: "%prompt%",
+    templateValues: {},
+    sizeKey: "3:4",
+    width: "1088",
+    height: "1472",
+    pixelSize: DEFAULT_PIXEL_SIZE,
+    blockSize: DEFAULT_BLOCK_SIZE,
+    seedMode: "random",
+    seedText: "",
+    steps: "20",
+    cfg: "6",
+    sampler: "DPM++ 2M",
+    scheduler: "Karras",
+    img2imgChecked: false,
+    denoisingStrength: "0.5",
+    resizeMode: 0,
+    maskMode: "not masked",
+    maskBlur: "5",
+    brushSize: "50",
+    penTool: "pen",
+    restoreAfterwards: false,
+    inpaintingFill: 1,
+    inpaintFullRes: false,
+    inpaintFullResPadding: "32",
+  });
 }
 
-// The JSON-facing shape of a template (keim's format, 2026-11-24):
-// snake_case keys, numeric parameter values as numbers. This is
-// what the Parameter pane's JSON editor shows and accepts, and
-// the boundary where TemplateRecord <-> JSON conversions happen.
-function templateToJsonObject(t: TemplateRecord): Record<string, unknown> {
-  const s = t.settings;
-  const num = (v: string, fallback: number) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  };
-  const obj: Record<string, unknown> = {
-    title: t.title,
-    label: t.label,
-    model: t.model,
-    positive_prompt_template: s.promptTemplate,
-    negative_prompt: t.negativePrompt,
-    template_values: s.templateValues,
-    steps: num(s.steps, 20),
-    cfg: num(s.cfg, 5.5),
-    sampler: s.sampler,
-    scheduler: s.scheduler,
-    denoising_strength: num(s.denoisingStrength, 0.5),
-    restore_afterwards: s.restoreAfterwards,
-    inpainting_fill: s.inpaintingFill,
-    inpaint_full_res: s.inpaintFullRes,
-    inpaint_full_res_padding: num(s.inpaintFullResPadding, 32),
-    mask_mode: s.maskMode,
-    mask_blur: num(s.maskBlur, 0),
-    brush_size: num(s.brushSize, 100),
-    pen_tool: s.penTool,
-  };
-  if (t.additionalModules && t.additionalModules.length > 0) {
-    obj.additional_modules = t.additionalModules;
-  }
-  return obj;
-}
-
-function templateJsonText(t: TemplateRecord): string {
-  return JSON.stringify(templateToJsonObject(t), null, 2);
-}
-
-// Parses the JSON editor's text back into a template. The
-// parameter fields are mapped onto the internal record names and
-// run through restoredRecord, so every existing validation and
-// coercion applies; fields the JSON omits keep the base record's
-// values (the live form at commit time). Structural problems
-// (not an object, missing/empty title, label or model) are
-// reported as an error and nothing is applied.
-function templateFromJson(
-  parsed: unknown,
-  base: SettingsSnapshot,
-): { record: TemplateRecord } | { error: string } {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { error: "テンプレートは JSON オブジェクトで入力してください。" };
-  }
-  const j = parsed as Record<string, unknown>;
-  const title = typeof j.title === "string" ? j.title.trim() : "";
-  const label = typeof j.label === "string" ? j.label.trim() : "";
-  const model = typeof j.model === "string" ? j.model.trim() : "";
-  if (!title) return { error: "title が空です。" };
-  if (!label) return { error: "label が空です。" };
-  if (!model) return { error: "model が空です。" };
-  if (
-    j.positive_prompt_template != null &&
-    typeof j.positive_prompt_template !== "string"
-  ) {
-    return { error: "positive_prompt_template は文字列で入力してください。" };
-  }
-  if (j.negative_prompt != null && typeof j.negative_prompt !== "string") {
-    return { error: "negative_prompt は文字列で入力してください。" };
-  }
-  // Map the JSON fields onto the internal record names.
-  // inpainting_fill is coerced to a number first because
-  // restoredRecord only accepts the numeric 0..3.
-  const fillRaw = j.inpainting_fill;
-  const internal: Record<string, unknown> = {
-    promptTemplate: j.positive_prompt_template,
-    templateValues: j.template_values,
-    steps: j.steps,
-    cfg: j.cfg,
-    sampler: j.sampler,
-    scheduler: j.scheduler,
-    denoisingStrength: j.denoising_strength,
-    restoreAfterwards: j.restore_afterwards,
-    inpaintingFill:
-      typeof fillRaw === "string" && fillRaw.trim() !== ""
-        ? Number(fillRaw)
-        : fillRaw,
-    inpaintFullRes: j.inpaint_full_res,
-    inpaintFullResPadding: j.inpaint_full_res_padding,
-    maskMode: j.mask_mode,
-    maskBlur: j.mask_blur,
-    brushSize: j.brush_size,
-    penTool: j.pen_tool,
-  };
-  const settings = restoredRecord(internal, base);
-  // Numeric template values the JSON omits fall back to the
-  // template text's declared defaults (the sliders and the
-  // payload composition read them from templateValues).
-  settings.templateValues = {
-    ...templateParamDefaults(settings.promptTemplate),
-    ...settings.templateValues,
-  };
-  let additionalModules: string[] | undefined;
-  if (Array.isArray(j.additional_modules)) {
-    const mods = j.additional_modules.filter(
-      (m): m is string => typeof m === "string" && m.trim() !== "",
-    );
-    if (mods.length > 0) additionalModules = mods;
-  }
+function defaultTemplate(): TemplateRecord {
   return {
-    record: {
-      title,
-      label,
-      model,
-      negativePrompt:
-        typeof j.negative_prompt === "string" ? j.negative_prompt : "",
-      ...(additionalModules ? { additionalModules } : {}),
-      settings,
-    },
+    title: "テンプレート",
+    model: MODELS[0]!.checkpoint,
+    negativePrompt: DEFAULT_TEMPLATE_NEGATIVE,
+    settings: commonDefaultSettings(),
   };
 }
 
@@ -1217,7 +1133,6 @@ function parseSettingsBundle(saved: Record<string, unknown>): {
 function templateRecordJson(t: TemplateRecord): Record<string, unknown> {
   return {
     title: t.title,
-    label: t.label,
     model: t.model,
     negativePrompt: t.negativePrompt,
     ...(t.additionalModules && t.additionalModules.length > 0
@@ -1256,9 +1171,8 @@ function parseTemplatesBundle(
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
       const e = raw as Record<string, unknown>;
       const title = typeof e.title === "string" ? e.title : "";
-      const label = typeof e.label === "string" ? e.label : "";
       const model = typeof e.model === "string" ? e.model : "";
-      if (!title || !label || !model || seen.has(title)) continue;
+      if (!title || !model || seen.has(title)) continue;
       seen.add(title);
       const builtin = builtinOfTitle(title);
       const base = builtin
@@ -1277,7 +1191,6 @@ function parseTemplatesBundle(
       }
       templates.push({
         title,
-        label,
         model,
         negativePrompt:
           typeof e.negativePrompt === "string" ? e.negativePrompt : "",
@@ -2068,12 +1981,10 @@ export function App() {
   // list holds every template's last-stashed record, and the
   // settings save flow substitutes the live copy for the active
   // entry (the same arrangement the per-model records used).
-  const [templates, setTemplates] = useState<TemplateRecord[]>(() =>
-    defaultTemplates(""),
-  );
-  const [activeTitle, setActiveTitle] = useState<string>(
-    BUILTIN_TEMPLATES[0]!.title,
-  );
+  const [templates, setTemplates] = useState<TemplateRecord[]>(() => [
+    defaultTemplate(),
+  ]);
+  const [activeTitle, setActiveTitle] = useState<string>("テンプレート");
   const [sizeKey, setSizeKey] = useState<string | null>("3:4");
   const [width, setWidth] = useState("1088");
   const [height, setHeight] = useState("1472");
@@ -2092,14 +2003,16 @@ export function App() {
   const [templateValues, setTemplateValues] = useState<
     Record<string, number>
   >(() => templateParamDefaults(DEFAULT_TEMPLATES.wai));
-  // The Parameter pane's template JSON editor works on a draft;
-  // the active template only changes when its 更新 button
-  // commits a valid JSON. While the draft is untouched (equal to
-  // templateDraftSyncRef), it follows the live form so the JSON
-  // view never goes stale behind parameter edits.
-  const [templateJsonDraft, setTemplateJsonDraft] = useState("");
-  const templateDraftSyncRef = useRef("");
-  const [templateJsonError, setTemplateJsonError] = useState<string | null>(null);
+  // The Parameter pane's template fields (title / model /
+  // positive template text) work on drafts; the active template
+  // only changes when the 更新 button commits them. The drafts
+  // are re-synced from the active template at every structural
+  // change (switch, restore, duplicate, delete, reset, commit).
+  const [titleDraft, setTitleDraft] = useState("テンプレート");
+  const [modelDraft, setModelDraft] = useState(MODELS[0]!.checkpoint);
+  const [templateTextDraft, setTemplateTextDraft] = useState("%prompt%");
+  const [templateFieldsError, setTemplateFieldsError] =
+    useState<string | null>(null);
   const [showTemplateDeleteConfirm, setShowTemplateDeleteConfirm] =
     useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -2262,26 +2175,9 @@ export function App() {
       t.title === activeTemplate.title ? liveTemplateRecord : t,
     ),
   );
-  // History display: a job's model field is its template title —
-  // resolve it to the template's label when the template still
-  // exists, else fall back to the built-in / raw mapping.
-  const jobModelLabel = (key: string | null): string =>
-    (key != null && templates.find((t) => t.title === key)?.label) ||
-    modelLabel(key);
-  // Keep an untouched JSON draft in sync with the live form, so
-  // the Parameter pane's JSON view reflects parameter edits made
-  // through the controls. A draft the user has started editing
-  // is left alone.
-  useEffect(() => {
-    if (templateJsonDraft === templateDraftSyncRef.current) {
-      const text = templateJsonText(liveTemplateRecord);
-      if (text !== templateDraftSyncRef.current) {
-        templateDraftSyncRef.current = text;
-        setTemplateJsonDraft(text);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settingsJson]);
+  // History display: a job's model field is its template title
+  // (or a legacy model key), resolved for display.
+  const jobModelLabel = (key: string | null): string => modelLabel(key);
   // The style popup's sliders are driven by the committed
   // template's numeric parameters.
   const styleParams = parseTemplateParams(promptTemplate);
@@ -2397,21 +2293,31 @@ export function App() {
       applySettingsRecord(active.settings);
       setNegativePrompt(active.negativePrompt);
       restoredNegative = active.negativePrompt;
-      syncTemplateDraft(active);
+      syncTemplateFields(active);
       lastSavedSettingsRef.current = templatesBundleJson(
         active.title,
         parsed.templates,
       );
     } else {
-      // No saved settings at all: keep the form's initial values
-      // as-is (they are NOT any model's defaults — e.g. the wai
-      // weights start at 1 / 0.7, not the 1.2 / 0.7 preset). The
-      // template list still gets proper factory defaults so the
-      // built-ins carry the standard negative from the start (the
-      // active entry is shadowed by the live form in the save
-      // flow, exactly as before).
-      setTemplates(defaultTemplates(standardNegative));
-      lastSavedSettingsRef.current = settingsJsonRef.current;
+      // Fresh install: exactly one template — the common default
+      // (keim, 2026-11-24). When no negative was ever saved, the
+      // default is applied to the live form as well, so the app
+      // starts at the default values; a saved prompt negative
+      // (user data from a settings-less state) still wins for
+      // the live field, and the save flow then makes it the
+      // template's.
+      const def = defaultTemplate();
+      setTemplates([def]);
+      setActiveTitle(def.title);
+      syncTemplateFields(def);
+      if (savedNegative == null) {
+        applySettingsRecord(def.settings);
+        setNegativePrompt(def.negativePrompt);
+        restoredNegative = def.negativePrompt;
+        lastSavedSettingsRef.current = templatesBundleJson(def.title, [def]);
+      } else {
+        lastSavedSettingsRef.current = settingsJsonRef.current;
+      }
     }
     const nextPrompt = restoredPrompt(savedPromptRecord, {
       prompt,
@@ -3456,14 +3362,15 @@ export function App() {
     setInpaintFullResPadding(nextSettings.inpaintFullResPadding);
   }
 
-  // Force the JSON editor's draft to a record's serialization
+  // Sync the Parameter pane's template fields to a record
   // (template switches, commits, resets, startup restore): any
-  // uncommitted draft edits are discarded, as the old template
+  // uncommitted field edits are discarded, as the old template
   // editor's draft was on a model switch.
-  function syncTemplateDraft(record: TemplateRecord) {
-    const text = templateJsonText(record);
-    templateDraftSyncRef.current = text;
-    setTemplateJsonDraft(text);
+  function syncTemplateFields(record: TemplateRecord) {
+    setTitleDraft(record.title);
+    setModelDraft(record.model);
+    setTemplateTextDraft(record.settings.promptTemplate);
+    setTemplateFieldsError(null);
   }
 
   function applyTemplate(title: string) {
@@ -3471,78 +3378,91 @@ export function App() {
     if (title === activeTemplate.title) return;
     const next = templates.find((t) => t.title === title);
     if (!next) return;
-    // Templates remember their parameters (2026-11-24, from the
-    // per-model memory): stash the live form as the outgoing
-    // template's record, then restore the incoming template's.
-    // The image size, the generation mode, the resize mode, and
-    // the seed method are NOT template parameters: they stay
-    // exactly as they are across the switch.
+    // Templates remember their parameters: stash the live form
+    // as the outgoing template's record, then restore the
+    // incoming template's. The image size, the generation mode,
+    // the resize mode, and the seed method are NOT template
+    // parameters: they stay exactly as they are across the
+    // switch.
     setTemplates((prev) =>
       prev.map((t) => (t.title === activeTemplate.title ? liveTemplateRecord : t)),
     );
     setActiveTitle(next.title);
     setNegativePrompt(next.negativePrompt);
     applySettingsRecord(next.settings, { skipGlobal: true });
-    setTemplateJsonError(null);
-    syncTemplateDraft(next);
+    syncTemplateFields(next);
   }
 
-  // The Parameter pane's reset button: the active template back
-  // to its built-in factory JSON. Only shown while a built-in
-  // template is active; user templates have no factory state.
+  // The Parameter pane's reset button: the active template's
+  // parameters and negative back to the common defaults (keim,
+  // 2026-11-24). The template's title, model, and additional
+  // modules — its identity — are kept.
   function resetTemplateSettings() {
-    const builtin = builtinOfTitle(activeTemplate.title);
-    if (!builtin) return;
     markSettingsImmediate();
-    const def = builtinTemplate(builtin.key, standardNegative);
-    setTemplates((prev) =>
-      prev.map((t) => (t.title === activeTemplate.title ? def : t)),
-    );
-    setNegativePrompt(def.negativePrompt);
-    applySettingsRecord(def.settings, { skipGlobal: true });
-    setTemplateJsonError(null);
-    syncTemplateDraft(def);
-  }
-
-  // The JSON editor's 更新 button: parse and validate the draft,
-  // then replace the active template with it. The title may
-  // change (the selection follows it); a title another template
-  // already uses is an error. Invalid input applies nothing.
-  function commitTemplateJson() {
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(templateJsonDraft);
-    } catch {
-      setTemplateJsonError("JSON として読み取れませんでした。");
-      return;
-    }
-    const result = templateFromJson(parsedJson, liveSnapshot);
-    if ("error" in result) {
-      setTemplateJsonError(result.error);
-      return;
-    }
-    const rec = result.record;
-    if (
-      rec.title !== activeTemplate.title &&
-      templates.some((t) => t.title === rec.title)
-    ) {
-      setTemplateJsonError("同じ title のテンプレートが既にあります。");
-      return;
-    }
-    markSettingsImmediate();
+    const def = defaultTemplate();
+    const rec: TemplateRecord = {
+      ...activeTemplate,
+      negativePrompt: def.negativePrompt,
+      settings: def.settings,
+    };
     setTemplates((prev) =>
       prev.map((t) => (t.title === activeTemplate.title ? rec : t)),
     );
-    setActiveTitle(rec.title);
     setNegativePrompt(rec.negativePrompt);
     applySettingsRecord(rec.settings, { skipGlobal: true });
-    setTemplateJsonError(null);
-    syncTemplateDraft(rec);
+    syncTemplateFields(rec);
   }
 
-  // Duplicate the active template (the JSON editor's 複製): the
-  // copy — carrying the live form's current values — is inserted
-  // after the original and becomes active, ready to edit.
+  // The template fields' 更新 button: commit the title / model /
+  // positive template text drafts into the active template. The
+  // template stays a JSON record internally; these fields update
+  // its entries, and everything else (parameters edited through
+  // the controls, additional modules) is preserved. A changed
+  // template text keeps the numeric values it already has;
+  // parameters the new text declares but has no value for fall
+  // back to their declared defaults.
+  function commitTemplateFields() {
+    const title = titleDraft.trim();
+    if (!title) {
+      setTemplateFieldsError("タイトルが空です。");
+      return;
+    }
+    if (
+      title !== activeTemplate.title &&
+      templates.some((t) => t.title === title)
+    ) {
+      setTemplateFieldsError("同じタイトルのテンプレートが既にあります。");
+      return;
+    }
+    if (!modelDraft) {
+      setTemplateFieldsError("モデルが選択されていません。");
+      return;
+    }
+    markSettingsImmediate();
+    const rec: TemplateRecord = {
+      ...liveTemplateRecord,
+      title,
+      model: modelDraft,
+      settings: settingsSnapshotOf({
+        ...liveSnapshot,
+        promptTemplate: templateTextDraft,
+        templateValues: {
+          ...templateParamDefaults(templateTextDraft),
+          ...liveSnapshot.templateValues,
+        },
+      }),
+    };
+    setTemplates((prev) =>
+      prev.map((t) => (t.title === activeTemplate.title ? rec : t)),
+    );
+    setActiveTitle(title);
+    applySettingsRecord(rec.settings, { skipGlobal: true });
+    syncTemplateFields(rec);
+  }
+
+  // Duplicate the active template (the pane's 複製): the copy —
+  // carrying the live form's current values — is inserted after
+  // the original and becomes active, ready to edit.
   function duplicateTemplate() {
     markSettingsImmediate();
     const base = liveTemplateRecord;
@@ -3563,8 +3483,7 @@ export function App() {
       return arr;
     });
     setActiveTitle(title);
-    setTemplateJsonError(null);
-    syncTemplateDraft(copy);
+    syncTemplateFields(copy);
   }
 
   // Delete the active template (after the confirmation dialog):
@@ -3580,8 +3499,7 @@ export function App() {
     setActiveTitle(next.title);
     setNegativePrompt(next.negativePrompt);
     applySettingsRecord(next.settings, { skipGlobal: true });
-    setTemplateJsonError(null);
-    syncTemplateDraft(next);
+    syncTemplateFields(next);
     setShowTemplateDeleteConfirm(false);
   }
 
@@ -5471,8 +5389,7 @@ export function App() {
                 : { backgroundColor: "var(--surface)" }),
             }}
           >
-            <span className="text-sm font-semibold leading-tight">{t.label}</span>
-            <span className="truncate text-xs opacity-70">{t.title}</span>
+            <span className="truncate text-sm font-semibold leading-tight">{t.title}</span>
           </button>
         ))}
       </div>
@@ -6135,7 +6052,7 @@ export function App() {
                   style={{ minHeight: "2.5rem", borderTop: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">テンプレート</span>
-                  <span className="max-w-full truncate text-sm font-semibold leading-tight">{activeTemplate.label}</span>
+                  <span className="max-w-full truncate text-sm font-semibold leading-tight">{activeTemplate.title}</span>
                 </button>
                 <button
                   type="button"
@@ -6554,15 +6471,16 @@ export function App() {
                 リロード
               </button>
             </div>
-            {/* Template JSON editor (2026-11-24): the active
-                template as JSON. The draft is committed by the
-                更新 button; invalid JSON is reported and applies
-                nothing. 複製 duplicates the active template (with
-                the live values) and switches to the copy; 削除
-                removes it after a confirmation. */}
+            {/* Template fields (2026-11-24): the active
+                template's title / model / positive template
+                text, committed by the 更新 button. Internally
+                the template stays a JSON record; these fields
+                update its entries. 複製 duplicates the active
+                template (with the live values) and switches to
+                the copy; 削除 removes it after a confirmation. */}
             <div className="mb-2">
               <div className="mb-1 flex items-center justify-between gap-2">
-                <label htmlFor="template-json" className={labelCls}>テンプレート（JSON）</label>
+                <span className={labelCls}>テンプレート</span>
                 <div className="flex shrink-0 gap-1">
                   <button
                     type="button"
@@ -6583,8 +6501,12 @@ export function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={commitTemplateJson}
-                    disabled={templateJsonDraft === templateDraftSyncRef.current}
+                    onClick={commitTemplateFields}
+                    disabled={
+                      titleDraft.trim() === activeTemplate.title &&
+                      modelDraft === activeTemplate.model &&
+                      templateTextDraft === promptTemplate
+                    }
                     className="border px-2.5 py-1 text-xs font-medium rounded-[var(--radius)] disabled:opacity-40"
                     style={{
                       color: "var(--accent-text)",
@@ -6596,18 +6518,46 @@ export function App() {
                   </button>
                 </div>
               </div>
-              <textarea
-                id="template-json"
-                aria-label="テンプレート（JSON）"
-                value={templateJsonDraft}
-                onChange={(e) => { setTemplateJsonDraft(e.target.value); setTemplateJsonError(null); }}
-                className={`${inputCls} ${MONO} resize-none`}
-                style={{ height: "16rem" }}
-                spellCheck={false}
-              />
-              {templateJsonError && (
+              <div className="grid gap-2">
+                <div>
+                  <label htmlFor="template-title" className={labelCls}>タイトル</label>
+                  <input
+                    id="template-title"
+                    value={titleDraft}
+                    onChange={(e) => { setTitleDraft(e.target.value); setTemplateFieldsError(null); }}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="template-model" className={labelCls}>モデル</label>
+                  <select
+                    id="template-model"
+                    value={modelDraft}
+                    onChange={(e) => { setModelDraft(e.target.value); setTemplateFieldsError(null); }}
+                    className={inputCls}
+                  >
+                    {[...MODELS.map((m) => m.checkpoint),
+                      ...(MODELS.some((m) => m.checkpoint === modelDraft) ? [] : [modelDraft]),
+                    ].map((cp) => (
+                      <option key={cp} value={cp}>{cp}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="prompt-template" className={labelCls}>ポジティブプロンプトテンプレート</label>
+                  <textarea
+                    id="prompt-template"
+                    aria-label="ポジティブプロンプトテンプレート"
+                    value={templateTextDraft}
+                    onChange={(e) => { setTemplateTextDraft(e.target.value); setTemplateFieldsError(null); }}
+                    className={`${inputCls} resize-none`}
+                    style={{ height: "7.5rem" }}
+                  />
+                </div>
+              </div>
+              {templateFieldsError && (
                 <p role="alert" className="mt-1 text-xs" style={{ color: "var(--err)" }}>
-                  {templateJsonError}
+                  {templateFieldsError}
                 </p>
               )}
             </div>
@@ -6752,16 +6702,14 @@ export function App() {
                     </div>
                   </div>
                 </div>
-                {builtinOfTitle(activeTemplate.title) && (
-                  <button
-                    type="button"
-                    onClick={resetTemplateSettings}
-                    className="mt-3 w-full border px-3 py-2 text-sm font-medium rounded-[var(--radius)]"
-                    style={{ color: "var(--err)", borderColor: "var(--err)", backgroundColor: "var(--surface)" }}
-                  >
-                    選択中のテンプレートをデフォルトに戻す
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={resetTemplateSettings}
+                  className="mt-3 w-full border px-3 py-2 text-sm font-medium rounded-[var(--radius)]"
+                  style={{ color: "var(--err)", borderColor: "var(--err)", backgroundColor: "var(--surface)" }}
+                >
+                  選択中のテンプレートをデフォルトに戻す
+                </button>
               </details>
 
             </div>
