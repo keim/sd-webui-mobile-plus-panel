@@ -94,13 +94,14 @@ const okResponse = z.object({ ok: z.boolean() });
 
 const generationRequest = z.object({
   prompt: z.string().min(1).max(4000),
-  model: z.enum(["wai", "pornmaster", "zimage"]),
+  // The active generation template's title (selection is by
+  // template, not by model — 2026-11-24). The checkpoint the run
+  // actually used travels inside the payload's override_settings.
+  model: z.string().min(1).max(200),
   extraNegative: z.string().max(2000).default(""),
   // Editable full negative prompt (Parameter pane). Used verbatim
-  // as the negative for wai / pornmaster. This field is the job
-  // record's copy of the user's negative text; the payload's
-  // negative_prompt is composed client-side from it (empty for
-  // zimage).
+  // as the payload's negative_prompt. This field is the job
+  // record's copy of the user's negative text.
   negativePrompt: z.string().max(4000).optional(),
   width: z.number().int().min(64).max(4096),
   height: z.number().int().min(64).max(4096),
