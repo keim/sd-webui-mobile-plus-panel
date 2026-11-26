@@ -2094,18 +2094,16 @@ export function App() {
   // The template pane's model dropdown is built from the live
   // checkpoint list (backend getModelList -> /sdapi/v1/sd-models),
   // so checkpoints installed later (the Anima family) are
-  // selectable without a panel update. On any failure the
-  // dropdown falls back to the static MODELS checkpoints, so the
-  // pane never breaks when the list is unavailable.
+  // selectable without a panel update. There is deliberately no
+  // static fallback list (keim, 2026-11-26): when the fetch fails
+  // the list is empty and only the current draft (appended below
+  // when it is not in the list) remains selectable.
   const modelListQuery = useQuery({
     queryKey: ["modelList"],
     queryFn: () => api.getModelList({}),
   });
   const fetchedModels = modelListQuery.data?.models ?? [];
-  const modelOptions =
-    fetchedModels.length > 0
-      ? fetchedModels.map((m) => m.name)
-      : MODELS.map((m) => m.checkpoint);
+  const modelOptions = fetchedModels.map((m) => m.name);
   // Latest fetched list for draft syncing: syncTemplateFields
   // normalizes through this ref, because the restore effect can
   // run in the same commit that delivers the list (an effect-only
