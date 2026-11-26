@@ -162,59 +162,101 @@ type TemplateRecord = {
 };
 
 // --- Per-model positive prompt templates (2026-11-23) ---
-// Each model holds a template; the final positive prompt is the
-// template with its %...% tokens replaced:
-//   %prompt%                  -> the prompt area's text, as-is
+// Each template holds a positive prompt template; the final
+// positive prompt is the template with its %...% tokens replaced:
+//   %prompt%                  -> the prompt area's text, as-is.
+//                                When the template has no %prompt%
+//                                token, one is treated as standing
+//                                at the start, followed by a
+//                                newline (2026-11-26).
 //   %label:min:max:step:def%  -> a numeric parameter; one slider
 //                                per parameter appears in the
 //                                style （調整） popup, and the
 //                                token is replaced by its value
+//   %abc/def/ghi%             -> a single-choice parameter
+//                                (2026-11-26): option buttons in
+//                                the style popup; the picked
+//                                option is substituted, or
+//                                nothing when none is picked
+//   %abc,def,ghi%             -> a multi-choice parameter: any
+//                                number of options may be picked,
+//                                substituted comma-separated in
+//                                declaration order
 // Any other %...% token is left in the text untouched.
-type TemplateParam = {
-  label: string;
-  min: number;
-  max: number;
-  step: number;
-  def: number;
-};
+type TemplateParam =
+  | { kind: "slider"; label: string; min: number; max: number; step: number; def: number }
+  | { kind: "choice"; key: string; options: string[]; multi: boolean };
+
+// A parameter's current value: a number for sliders, the picked
+// option ("" = none) for single choices, the picked options for
+// multi choices.
+type TemplateValue = number | string | string[];
 
 const TEMPLATE_PARAM_RE =
   /^([^:]+):(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?):(-?\d+(?:\.\d+)?)$/;
 
 function parseTemplateParamToken(token: string): TemplateParam | null {
   const m = TEMPLATE_PARAM_RE.exec(token);
-  if (!m) return null;
-  const label = m[1]!.trim();
-  const min = Number(m[2]);
-  const max = Number(m[3]);
-  const step = Number(m[4]);
-  const def = Number(m[5]);
-  if (!label || !(min < max) || !(step > 0)) return null;
-  return { label, min, max, step, def: Math.min(max, Math.max(min, def)) };
+  if (m) {
+    const label = m[1]!.trim();
+    const min = Number(m[2]);
+    const max = Number(m[3]);
+    const step = Number(m[4]);
+    const def = Number(m[5]);
+    if (!label || !(min < max) || !(step > 0)) return null;
+    return {
+      kind: "slider",
+      label, min, max, step,
+      def: Math.min(max, Math.max(min, def)),
+    };
+  }
+  const trimmed = token.trim();
+  if (trimmed.includes("/")) {
+    const options = trimmed.split("/").map((o) => o.trim()).filter((o) => o.length > 0);
+    if (options.length >= 2) {
+      return { kind: "choice", key: trimmed, options, multi: false };
+    }
+    return null;
+  }
+  if (trimmed.includes(",")) {
+    const options = trimmed.split(",").map((o) => o.trim()).filter((o) => o.length > 0);
+    if (options.length >= 2) {
+      return { kind: "choice", key: trimmed, options, multi: true };
+    }
+    return null;
+  }
+  return null;
 }
 
-// The template's numeric parameters, in order of first
-// appearance, deduplicated by label.
+function templateParamKey(p: TemplateParam): string {
+  return p.kind === "slider" ? p.label : p.key;
+}
+
+// The template's parameters, in order of first appearance,
+// deduplicated by label (sliders) or token text (choices).
 function parseTemplateParams(template: string): TemplateParam[] {
   const out: TemplateParam[] = [];
   const seen = new Set<string>();
   for (const match of template.matchAll(/%([^%]+)%/g)) {
     const p = parseTemplateParamToken(match[1]!);
-    if (p && !seen.has(p.label)) {
-      seen.add(p.label);
+    if (p && !seen.has(templateParamKey(p))) {
+      seen.add(templateParamKey(p));
       out.push(p);
     }
   }
   return out;
 }
 
-// The default value of every numeric parameter in a template
-// (its def, from the token syntax).
+// The default value of every parameter in a template: a slider's
+// def from the token syntax; choices start unselected.
 function templateParamDefaults(
   template: string,
-): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const p of parseTemplateParams(template)) out[p.label] = p.def;
+): Record<string, TemplateValue> {
+  const out: Record<string, TemplateValue> = {};
+  for (const p of parseTemplateParams(template)) {
+    out[templateParamKey(p)] =
+      p.kind === "slider" ? p.def : p.multi ? [] : "";
+  }
   return out;
 }
 
@@ -229,22 +271,69 @@ function formatTemplateValue(v: number, step: number): string {
   return String(parseFloat(v.toFixed(Math.min(decimals, 10))));
 }
 
+// The substitution text of a choice parameter: the picked
+// option for single choice ("" when none or when the stored pick
+// is no longer among the options); for multi choice, the picked
+// options in declaration order, joined with ", ".
+function choiceSubstitution(
+  p: Extract<TemplateParam, { kind: "choice" }>,
+  v: TemplateValue | undefined,
+): string {
+  if (p.multi) {
+    const picked = Array.isArray(v)
+      ? v
+      : typeof v === "string" && v
+        ? [v]
+        : [];
+    const set = new Set(picked);
+    return p.options.filter((o) => set.has(o)).join(", ");
+  }
+  return typeof v === "string" && p.options.includes(v) ? v : "";
+}
+
 function applyPromptTemplate(
   template: string,
   content: string,
-  values: Record<string, number>,
+  values: Record<string, TemplateValue>,
 ): string {
-  return template.replace(/%([^%]+)%/g, (whole, token: string) => {
+  // A template without %prompt% is treated as if "%prompt%" and
+  // a newline stood at its start (2026-11-26).
+  const effective = template.includes("%prompt%")
+    ? template
+    : `%prompt%\n${template}`;
+  return effective.replace(/%([^%]+)%/g, (whole, token: string) => {
     if (token === "prompt") return content;
     const p = parseTemplateParamToken(token);
     if (!p) return whole;
-    const v = values[p.label] ?? p.def;
+    if (p.kind === "choice") return choiceSubstitution(p, values[p.key]);
+    const raw = values[p.label];
+    const v = typeof raw === "number" ? raw : p.def;
     const clamped = Math.min(p.max, Math.max(p.min, v));
     return formatTemplateValue(clamped, p.step);
   });
 }
 
-// The models' built-in templates. wai's reproduces the former
+// The style cell's summary text: every parameter's current
+// value — sliders formatted, choices as their picked text —
+// joined with commas; unselected choices contribute nothing.
+function styleSummary(
+  params: TemplateParam[],
+  values: Record<string, TemplateValue>,
+): string {
+  const parts: string[] = [];
+  for (const p of params) {
+    if (p.kind === "slider") {
+      const raw = values[p.label];
+      parts.push(
+        formatTemplateValue(typeof raw === "number" ? raw : p.def, p.step),
+      );
+    } else {
+      const t = choiceSubstitution(p, values[p.key]);
+      if (t) parts.push(t.replaceAll(", ", ","));
+    }
+  }
+  return parts.join(",");
+}
 
 // Fetch an image URL (the workbench's own /files/ route) and
 // return its raw base64 — the client now carries the img2img init
@@ -654,7 +743,7 @@ function findPromptTextMatch(
 // parseTemplatesBundle.
 type SettingsSnapshot = {
   promptTemplate: string;
-  templateValues: Record<string, number>;
+  templateValues: Record<string, TemplateValue>;
   sizeKey: string | null;
   width: string;
   height: string;
@@ -760,11 +849,18 @@ function restoredRecord(
     typeof saved.templateValues === "object" &&
     !Array.isArray(saved.templateValues)
   ) {
-    const tv: Record<string, number> = {};
+    const tv: Record<string, TemplateValue> = {};
     for (const [k, val] of Object.entries(
       saved.templateValues as Record<string, unknown>,
     )) {
       if (typeof val === "number" && Number.isFinite(val)) tv[k] = val;
+      else if (typeof val === "string") tv[k] = val;
+      else if (
+        Array.isArray(val) &&
+        val.every((x) => typeof x === "string")
+      ) {
+        tv[k] = [...val];
+      }
     }
     next.templateValues = tv;
   }
@@ -1762,7 +1858,7 @@ export function App() {
   const [scheduler, setScheduler] = useState("Karras");
   const [promptTemplate, setPromptTemplate] = useState("%prompt%");
   const [templateValues, setTemplateValues] =
-    useState<Record<string, number>>({});
+    useState<Record<string, TemplateValue>>({});
   // The Parameter pane's template fields (title / model /
   // positive template text) work on drafts; the active template
   // only changes when the 更新 button commits them. The drafts
@@ -1990,8 +2086,8 @@ export function App() {
   // History display: a job's model field is its template title
   // (or a legacy model key), resolved for display.
   const jobModelLabel = (key: string | null): string => modelLabel(key);
-  // The style popup's sliders are driven by the committed
-  // template's numeric parameters.
+  // The style popup's controls are driven by the committed
+  // template's parameters.
   const styleParams = parseTemplateParams(promptTemplate);
   const promptSnapshot: PromptSnapshot = { prompt, negativePrompt };
   const promptJson = JSON.stringify(promptSnapshot);
@@ -5207,39 +5303,95 @@ export function App() {
     <div className={popupPanelCompactCls} role="dialog" aria-label="調整設定">
       {styleParams.length === 0 ? (
         <p className="text-sm text-[var(--dim)]">
-          テンプレートに数値パラメータがありません。
+          テンプレートにパラメータがありません。
         </p>
       ) : (
-        styleParams.map((p, i) => (
-          <div key={p.label} className={i > 0 ? "mt-1.5" : undefined}>
-            <label
-              htmlFor={`style-param-${i}`}
-              className="flex items-center justify-between text-sm"
-            >
-              <span>{p.label}</span>
-              <span className={MONO}>
-                {formatTemplateValue(templateValues[p.label] ?? p.def, p.step)}
-              </span>
-            </label>
-            <input
-              id={`style-param-${i}`}
-              aria-label={`${p.label} の値`}
-              type="range"
-              min={p.min}
-              max={p.max}
-              step={p.step}
-              value={templateValues[p.label] ?? p.def}
-              onChange={(e) =>
-                setTemplateValues((prev) => ({
-                  ...prev,
-                  [p.label]: Number(e.target.value),
-                }))
-              }
-              onBlur={flushSettingsSave}
-              className="w-full"
-            />
-          </div>
-        ))
+        styleParams.map((p, i) => {
+          if (p.kind === "choice") {
+            const v = templateValues[p.key];
+            return (
+              <div key={p.key} className={i > 0 ? "mt-1.5" : undefined}>
+                <div
+                  className="flex flex-wrap gap-1"
+                  role="group"
+                  aria-label={`${p.key} の選択`}
+                >
+                  {p.options.map((opt) => {
+                    const selected = p.multi
+                      ? Array.isArray(v) && v.includes(opt)
+                      : v === opt;
+                    return (
+                      <button
+                        key={opt}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => {
+                          markSettingsImmediate();
+                          setTemplateValues((prev) => {
+                            const cur = prev[p.key];
+                            if (p.multi) {
+                              const next = new Set(
+                                Array.isArray(cur) ? cur : [],
+                              );
+                              if (next.has(opt)) next.delete(opt);
+                              else next.add(opt);
+                              return {
+                                ...prev,
+                                [p.key]: p.options.filter((o) => next.has(o)),
+                              };
+                            }
+                            return { ...prev, [p.key]: cur === opt ? "" : opt };
+                          });
+                        }}
+                        className="px-2 py-1 text-sm"
+                        style={{
+                          border: "1px solid var(--border)",
+                          ...(selected
+                            ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                            : { backgroundColor: "var(--surface)" }),
+                        }}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          }
+          const rawVal = templateValues[p.label];
+          const sliderVal = typeof rawVal === "number" ? rawVal : p.def;
+          return (
+            <div key={p.label} className={i > 0 ? "mt-1.5" : undefined}>
+              <label
+                htmlFor={`style-param-${i}`}
+                className="flex items-center justify-between text-sm"
+              >
+                <span>{p.label}</span>
+                <span className={MONO}>
+                  {formatTemplateValue(sliderVal, p.step)}
+                </span>
+              </label>
+              <input
+                id={`style-param-${i}`}
+                aria-label={`${p.label} の値`}
+                type="range"
+                min={p.min}
+                max={p.max}
+                step={p.step}
+                value={sliderVal}
+                onChange={(e) =>
+                  setTemplateValues((prev) => ({
+                    ...prev,
+                    [p.label]: Number(e.target.value),
+                  }))
+                }
+                onBlur={flushSettingsSave}
+                className="w-full"
+              />
+            </div>
+          );
+        })
       )}
     </div>
   ) : editorPopup === "denoise" ? (
@@ -5880,7 +6032,7 @@ export function App() {
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)", borderTop: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">調整</span>
-                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{styleParams.length > 0 ? `${styleParams.map((p) => formatTemplateValue(templateValues[p.label] ?? p.def, p.step)).join(",")}` : "なし"}</span>
+                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{styleSummary(styleParams, templateValues) || "なし"}</span>
                 </button>
                 <span
                   aria-hidden="true"
