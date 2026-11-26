@@ -2091,6 +2091,44 @@ export function App() {
     queryFn: () => api.getWorkspaceState({}),
   });
 
+  // The template pane's model dropdown is built from the live
+  // checkpoint list (backend getModelList -> /sdapi/v1/sd-models),
+  // so checkpoints installed later (the Anima family) are
+  // selectable without a panel update. On any failure the
+  // dropdown falls back to the static MODELS checkpoints, so the
+  // pane never breaks when the list is unavailable.
+  const modelListQuery = useQuery({
+    queryKey: ["modelList"],
+    queryFn: () => api.getModelList({}),
+  });
+  const fetchedModels = modelListQuery.data?.models ?? [];
+  const modelOptions =
+    fetchedModels.length > 0
+      ? fetchedModels.map((m) => m.name)
+      : MODELS.map((m) => m.checkpoint);
+  // Latest fetched list for draft syncing: syncTemplateFields
+  // normalizes through this ref, because the restore effect can
+  // run in the same commit that delivers the list (an effect-only
+  // normalization would be overwritten by that sync and never
+  // re-fire, the intermediate value never having committed).
+  const modelListRef = useRef<{ name: string; stem: string }[]>([]);
+  modelListRef.current = fetchedModels;
+
+  // Saved templates may carry the bare file stem (e.g.
+  // waiNSFWIllustrious_v140) while the live list uses the
+  // canonical model_name (illustrious_waiNSFWIllustrious_v140).
+  // Both forms resolve as sd_model_checkpoint (verified live
+  // 2026-11-26); when the draft matches a fetched stem, migrate
+  // the draft to the canonical name, so the dropdown shows one
+  // entry per checkpoint and the next commit stores the
+  // canonical value.
+  useEffect(() => {
+    if (fetchedModels.length === 0) return;
+    if (fetchedModels.some((m) => m.name === modelDraft)) return;
+    const byStem = fetchedModels.find((m) => m.stem === modelDraft);
+    if (byStem) setModelDraft(byStem.name);
+  }, [fetchedModels, modelDraft]);
+
   // The save index （保存インデクス） is managed HERE, in the
   // browser (keim, 2026-11-23): it starts from the server's
   // latest value (getWorkspaceState.saveIndex, applied once by
@@ -3376,7 +3414,12 @@ export function App() {
   // editor's draft was on a model switch.
   function syncTemplateFields(record: TemplateRecord) {
     setTitleDraft(record.title);
-    setModelDraft(record.model);
+    // Normalize a bare-stem model to the canonical model_name
+    // when the live list is already known (see modelListRef).
+    const byStem = modelListRef.current.find(
+      (m) => m.stem === record.model && m.name !== record.model,
+    );
+    setModelDraft(byStem ? byStem.name : record.model);
     setTemplateTextDraft(record.settings.promptTemplate);
     setTemplateFieldsError(null);
   }
@@ -6554,8 +6597,8 @@ export function App() {
                     onChange={(e) => { setModelDraft(e.target.value); setTemplateFieldsError(null); }}
                     className={inputCls}
                   >
-                    {[...MODELS.map((m) => m.checkpoint),
-                      ...(MODELS.some((m) => m.checkpoint === modelDraft) ? [] : [modelDraft]),
+                    {[...modelOptions,
+                      ...(modelOptions.includes(modelDraft) ? [] : [modelDraft]),
                     ].map((cp) => (
                       <option key={cp} value={cp}>{cp}</option>
                     ))}

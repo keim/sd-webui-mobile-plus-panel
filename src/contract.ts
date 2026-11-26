@@ -226,6 +226,12 @@ export const Actions = {
     request: z.object({}),
     response: z.object({ standardNegative: z.string() }),
   },
+  getModelList: {
+    request: z.object({}),
+    response: z.object({
+      models: z.array(z.object({ name: z.string(), stem: z.string() })),
+    }),
+  },
   getWordDictionary: {
     request: z.object({}),
     response: z.object({ dictionary: z.string() }),

@@ -386,6 +386,21 @@ async function indexFromArgs(args) {
 // --- actions ---------------------------------------------------------------
 const ACTIONS = {
   getStandardNegative: async () => ({ standardNegative: STANDARD_NEGATIVE }),
+  // Mirrors illu's live /sdapi/v1/sd-models (2026-11-26): the two
+  // illustrious checkpoints live in a subfolder, so their canonical
+  // model_name carries the illustrious_ prefix while their stem
+  // (what saved templates carry) does not.
+  getModelList: async () => ({
+    models: [
+      { name: "FlanimeAnima_v20", stem: "FlanimeAnima_v20" },
+      { name: "illustrious_pornmasterPro_realismILV4", stem: "pornmasterPro_realismILV4" },
+      { name: "illustrious_waiNSFWIllustrious_v140", stem: "waiNSFWIllustrious_v140" },
+      { name: "JANIMA29b_V1.1_bf16", stem: "JANIMA29b_V1.1_bf16" },
+      { name: "MiaoMiao RealSkin _Anima2.9b_v1_n", stem: "MiaoMiao RealSkin _Anima2.9b_v1_n" },
+      { name: "WAI-ANIMA1", stem: "WAI-ANIMA1" },
+      { name: "z-image-turbo-quant-bundle", stem: "z-image-turbo-quant-bundle" },
+    ],
+  }),
   getWordDictionary: async () => ({
     dictionary: JSON.stringify(state.dictionary),
   }),
