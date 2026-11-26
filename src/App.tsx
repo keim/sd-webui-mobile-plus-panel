@@ -9,7 +9,7 @@ type Job = ApiResponse<typeof api, "listJobs">["jobs"][number];
 type UploadImage = ApiResponse<typeof api, "listUploadImages">["uploads"][number];
 type EditorSource = ApiResponse<typeof api, "getEditorSource">["source"];
 type GenerationArgs = ApiRequest<typeof api, "createJob">;
-type SeedMode = "random" | "fixed" | "reuse";
+type SeedMode = "random" | "fixed";
 // Pane keys. There is no tab bar and no flick navigation: the
 // Editor pane is the hub, and panes are reached only through
 // in-pane controls (image tap → Inpaint, the parameter panel's
@@ -800,10 +800,13 @@ function restoredRecord(
   if (bs != null) next.blockSize = bs;
   if (
     saved.seedMode === "random" ||
-    saved.seedMode === "fixed" ||
-    saved.seedMode === "reuse"
+    saved.seedMode === "fixed"
   ) {
     next.seedMode = saved.seedMode;
+  } else if (saved.seedMode === "reuse") {
+    // The reuse mode was folded into fixed (2026-11-26): picking
+    // fixed now adopts the previous seed as the fixed value.
+    next.seedMode = "fixed";
   }
   const seedText = savedString(saved.seedText);
   if (seedText != null) next.seedText = seedText;
@@ -4039,19 +4042,13 @@ export function App() {
     let seedArg: { seedMode: "random" | "fixed"; seed: number | null };
     if (seedMode === "random") {
       seedArg = { seedMode: "random", seed: null };
-    } else if (seedMode === "fixed") {
+    } else {
       const s = Number(seedText);
       if (!Number.isInteger(s) || s < 0 || s > 4294967295) {
         setFormError("seed は 0〜4294967295 の整数で入力してください。");
         return null;
       }
       seedArg = { seedMode: "fixed", seed: s };
-    } else {
-      if (lastSeed == null) {
-        setFormError("再利用できる前回の seed がまだありません。");
-        return null;
-      }
-      seedArg = { seedMode: "fixed", seed: lastSeed };
     }
     // Generation mode is decided by the mode toggle
     // (img2imgChecked), the source image, and the mask:
@@ -6419,14 +6416,29 @@ export function App() {
                     [
                       { key: "random", label: "ランダム" },
                       { key: "fixed", label: "固定" },
-                      { key: "reuse", label: "前回を再利用" },
                     ] as { key: SeedMode; label: string }[]
                   ).map((o, i) => (
                     <button
                       key={o.key}
                       type="button"
                       aria-pressed={seedMode === o.key}
-                      onClick={() => { markSettingsImmediate(); setSeedMode(o.key); }}
+                      onClick={() => {
+                        markSettingsImmediate();
+                        setSeedMode(o.key);
+                        // Picking fixed adopts the previous
+                        // generation's seed as the fixed value
+                        // (2026-11-26, folding in the old reuse
+                        // mode); with no previous seed yet, a
+                        // random value is adopted instead. The
+                        // field stays editable after.
+                        if (o.key === "fixed") {
+                          setSeedText(
+                            lastSeed != null
+                              ? String(lastSeed)
+                              : String(Math.floor(Math.random() * 4294967296)),
+                          );
+                        }
+                      }}
                       className={`flex-1 px-2 py-2 text-sm ${
                         seedMode === o.key ? "" : "bg-[var(--surface)]"
                       }`}
@@ -6452,11 +6464,6 @@ export function App() {
                     placeholder="例: 123456789"
                     className={`${inputCls} ${MONO} mt-1`}
                   />
-                )}
-                {seedMode === "reuse" && (
-                  <p className={`mt-1 text-sm text-[var(--dim)] ${MONO}`}>
-                    {lastSeed != null ? `前回の seed: ${lastSeed}` : "再利用できる前回の seed がまだありません"}
-                  </p>
                 )}
               </div>
 
