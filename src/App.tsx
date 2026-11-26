@@ -1607,6 +1607,14 @@ export function App() {
   // --- pane state ---
   const [tab, setTab] = useState<PaneKey>("editor");
   const [promptFocused, setPromptFocused] = useState(false);
+  // Whether the software keyboard is actually up while the
+  // prompt is focused, as tracked by the viewport watcher
+  // below. The prompt-focused layout (auxiliary panel shown,
+  // the other areas hidden) applies only while this is true
+  // (2026-11-27): focus alone — a hardware keyboard, a
+  // suppressed keyboard — keeps the default layout.
+  const [promptKeyboardOpen, setPromptKeyboardOpen] = useState(false);
+  const promptExpanded = promptFocused && promptKeyboardOpen;
   const [editorPopup, setEditorPopup] = useState<
     "model" | "style" | "denoise" | "blur" | "brush" | "resize" | null
   >(null);
@@ -2772,13 +2780,11 @@ export function App() {
   // fires on its own. While the prompt is focused, watch the
   // viewport height instead: a large shrink marks the keyboard as
   // open, and a return to near full height while the textarea still
-  // holds focus means the keyboard was closed — then do exactly
-  // what a blur does (leave the prompt-focused layout AND blur the
-  // textarea programmatically), so focus and layout never disagree
-  // and a later tap on the textarea re-fires focus and restores the
-  // focused layout. Opening the keyboard adds no switch of its own:
-  // the existing focus behaviour is unchanged. Only the main prompt
-  // textarea is in scope; other inputs are never watched.
+  // holds focus means the keyboard was closed. The open/closed
+  // flag drives the prompt-focused layout directly (2026-11-27):
+  // the layout is shown only while the keyboard is up, and focus
+  // is left untouched either way. Only the main prompt textarea
+  // is in scope; other inputs are never watched.
   //
   // Height signal: the effective height is the smaller of
   // visualViewport.height (primary signal — it shrinks under an
@@ -2847,6 +2853,7 @@ export function App() {
   useEffect(() => {
     if (!promptFocused) {
       promptKeyboardOpenRef.current = false;
+      setPromptKeyboardOpen(false);
       return;
     }
     const readHeight = () => {
@@ -2892,8 +2899,7 @@ export function App() {
             promptFullHeightRef.current = h;
             promptRebaselineRef.current = false;
             promptKeyboardOpenRef.current = false;
-            setPromptFocused(false);
-            promptRef.current?.blur();
+            setPromptKeyboardOpen(false);
           }
           return;
         }
@@ -2913,6 +2919,7 @@ export function App() {
         // never mark the keyboard as open.
         if (shrink >= 120 && shrink >= full * 0.15) {
           promptKeyboardOpenRef.current = true;
+          setPromptKeyboardOpen(true);
         }
         return;
       }
@@ -2921,9 +2928,10 @@ export function App() {
       // between the open and closed states).
       const tolerance = Math.max(48, full * 0.06);
       if (shrink <= tolerance) {
+        // Keyboard closed: only the layout returns (it follows
+        // the flag); focus stays where it is (2026-11-27).
         promptKeyboardOpenRef.current = false;
-        setPromptFocused(false);
-        promptRef.current?.blur();
+        setPromptKeyboardOpen(false);
       }
     };
     const vv = window.visualViewport;
@@ -3680,6 +3688,10 @@ export function App() {
       // If the deleted set included the job the Editor is
       // showing, the slot must re-read as unset.
       void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      // Same for the img2img source slot: deleting the locked
+      // (source) image releases the selection server-side, and
+      // the client must re-read it (2026-11-27).
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
     },
   });
 
@@ -3815,6 +3827,7 @@ export function App() {
       setShowEditorDeleteConfirm(false);
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
     },
   });
 
@@ -3880,6 +3893,7 @@ export function App() {
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["uploadImages"] });
       void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
     },
   });
 
@@ -4069,6 +4083,7 @@ export function App() {
       setShowUploadDeleteConfirm(false);
       void queryClient.invalidateQueries({ queryKey: ["uploadImages"] });
       void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
     },
   });
 
@@ -5607,7 +5622,7 @@ export function App() {
             aria-label="Editor"
             className="relative grid h-full min-h-0 min-w-0"
             style={{
-              gridTemplateRows: promptFocused ? "1fr auto" : "3fr 7fr auto",
+              gridTemplateRows: promptExpanded ? "1fr auto" : "3fr 7fr auto",
               gridTemplateColumns: "minmax(0, 1fr)",
             }}
           >
@@ -5619,10 +5634,10 @@ export function App() {
               className="grid min-h-0 px-3 py-1.5"
               style={{
                 gridTemplateColumns:
-                  img2imgChecked && !promptFocused
+                  img2imgChecked && !promptExpanded
                     ? "minmax(0, 1fr) minmax(0, 1fr)"
                     : "minmax(0, 1fr)",
-                gap: img2imgChecked && !promptFocused ? "0.5rem" : undefined,
+                gap: img2imgChecked && !promptExpanded ? "0.5rem" : undefined,
               }}
             >
               <textarea
@@ -5678,13 +5693,13 @@ export function App() {
                 className="h-full w-full min-w-0 resize-none border border-[var(--border)] bg-[var(--surface)] px-1.5 py-1 text-base text-[var(--text)]"
                 style={{ borderRadius: "var(--radius)" }}
               />
-              {img2imgChecked && !promptFocused && sourceImageArea}
+              {img2imgChecked && !promptExpanded && sourceImageArea}
             </div>
 
             {/* --- auxiliary panel (focused only): 3 rows x 6 cols
                 (word candidates / word operations / 定型文・
                 Undo・Redo・全選択 + 2 blank cells). --- */}
-            {promptFocused && (
+            {promptExpanded && (
             <div
               className="grid grid-cols-6 border-t border-[var(--border)] bg-[var(--surface)]"
               role="group"
@@ -5890,7 +5905,7 @@ export function App() {
                 switches the generation mode to the i2i/inpaint
                 side. The History button pinned at the panel's
                 bottom opens the History pane. --- */}
-            {!promptFocused && (
+            {!promptExpanded && (
             <div
               className="grid min-h-0 min-w-0 border-t border-[var(--border)]"
               style={{ gridTemplateColumns: "5fr 1fr" }}
@@ -6019,7 +6034,7 @@ export function App() {
                 pane). Bottom row: model / style / blank /
                 parameter (routes to the Parameter pane). Popups
                 open upward over the image row, as before. --- */}
-            {!promptFocused && (
+            {!promptExpanded && (
             <div data-popup-area="true" className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)]">
               {editorPopup != null && editorPopup !== "blur" && editorPopup !== "brush" && (
                 <div className="absolute inset-x-0 bottom-full">{editorPopupContent}</div>
