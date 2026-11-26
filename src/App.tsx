@@ -9,7 +9,6 @@ type Job = ApiResponse<typeof api, "listJobs">["jobs"][number];
 type UploadImage = ApiResponse<typeof api, "listUploadImages">["uploads"][number];
 type EditorSource = ApiResponse<typeof api, "getEditorSource">["source"];
 type GenerationArgs = ApiRequest<typeof api, "createJob">;
-type SeedMode = "random" | "fixed";
 // Pane keys. There is no tab bar and no flick navigation: the
 // Editor pane is the hub, and panes are reached only through
 // in-pane controls (image tap → Inpaint, the parameter panel's
@@ -749,8 +748,11 @@ type SettingsSnapshot = {
   height: string;
   pixelSize: number | null;
   blockSize: string;
-  seedMode: SeedMode;
-  seedText: string;
+  // The seed is one unified value (2026-11-27): the field's
+  // current value plus a pin. Unpinned generation sends -1
+  // (random); pinned generation adopts the field's value.
+  seed: string;
+  seedPinned: boolean;
   steps: string;
   cfg: string;
   sampler: string;
@@ -795,8 +797,8 @@ function settingsSnapshotOf(v: SettingsSnapshot): SettingsSnapshot {
     height: v.height,
     pixelSize: v.pixelSize,
     blockSize: v.blockSize,
-    seedMode: v.seedMode,
-    seedText: v.seedText,
+    seed: v.seed,
+    seedPinned: v.seedPinned,
     steps: v.steps,
     cfg: v.cfg,
     sampler: v.sampler,
@@ -894,18 +896,24 @@ function restoredRecord(
   }
   const bs = savedString(saved.blockSize);
   if (bs != null) next.blockSize = bs;
-  if (
-    saved.seedMode === "random" ||
-    saved.seedMode === "fixed"
-  ) {
-    next.seedMode = saved.seedMode;
-  } else if (saved.seedMode === "reuse") {
-    // The reuse mode was folded into fixed (2026-11-26): picking
-    // fixed now adopts the previous seed as the fixed value.
-    next.seedMode = "fixed";
+  const seedVal = savedString(saved.seed);
+  if (seedVal != null) next.seed = seedVal;
+  if (typeof saved.seedPinned === "boolean") {
+    next.seedPinned = saved.seedPinned;
   }
-  const seedText = savedString(saved.seedText);
-  if (seedText != null) next.seedText = seedText;
+  if (seedVal == null && typeof saved.seedMode === "string") {
+    // Legacy seedMode/seedText saves (before the 2026-11-27
+    // unification): fixed and reuse become a pinned seed holding
+    // the stored text; random becomes an unpinned -1.
+    const legacyText = savedString(saved.seedText);
+    if (saved.seedMode === "fixed" || saved.seedMode === "reuse") {
+      next.seedPinned = true;
+      if (legacyText != null) next.seed = legacyText;
+    } else if (saved.seedMode === "random") {
+      next.seedPinned = false;
+      next.seed = "-1";
+    }
+  }
   const steps = savedString(saved.steps);
   if (steps != null) next.steps = steps;
   const cfg = savedString(saved.cfg);
@@ -985,8 +993,8 @@ function commonDefaultSettings(): SettingsSnapshot {
     height: "1472",
     pixelSize: DEFAULT_PIXEL_SIZE,
     blockSize: DEFAULT_BLOCK_SIZE,
-    seedMode: "random",
-    seedText: "",
+    seed: "-1",
+    seedPinned: false,
     steps: "20",
     cfg: "6",
     sampler: "DPM++ 2M",
@@ -1849,8 +1857,19 @@ export function App() {
   const [height, setHeight] = useState("1472");
   const [pixelSize, setPixelSize] = useState<number | null>(DEFAULT_PIXEL_SIZE);
   const [blockSize, setBlockSize] = useState<string>(DEFAULT_BLOCK_SIZE);
-  const [seedMode, setSeedMode] = useState<SeedMode>("random");
-  const [seedText, setSeedText] = useState("");
+  const [seedText, setSeedText] = useState("-1");
+  const [seedPinned, setSeedPinned] = useState(false);
+  // The seed field always shows the current seed value: while
+  // unpinned it follows the newest completed generation's
+  // resulting seed (2026-11-27). While pinned it is left alone —
+  // the pinned value is what generation adopts. Typing in the
+  // field is never overwritten.
+  useEffect(() => {
+    if (seedPinned || lastSeed == null) return;
+    if (document.activeElement?.id === "seed-value") return;
+    const next = String(lastSeed);
+    setSeedText((prev) => (prev === next ? prev : next));
+  }, [lastSeed, seedPinned]);
   const [negativePrompt, setNegativePrompt] = useState("");
   const [steps, setSteps] = useState("20");
   const [cfg, setCfg] = useState("5.5");
@@ -2048,8 +2067,8 @@ export function App() {
     height,
     pixelSize,
     blockSize,
-    seedMode,
-    seedText,
+    seed: seedText,
+    seedPinned,
     steps,
     cfg,
     sampler,
@@ -3235,7 +3254,7 @@ export function App() {
   // button all go through here). The image size (sizeKey /
   // width / height / pixelSize / blockSize), the generation mode
   // (img2imgChecked), the resize mode, and the seed method
-  // (seedMode + the fixed seed value) are NOT template
+  // (the seed value and its pin) are NOT template
   // parameters (2026-11-23): with skipGlobal they are
   // left as-is, so switching templates or resetting one never
   // moves them. Only the startup restore applies them (from
@@ -3255,8 +3274,8 @@ export function App() {
       setBlockSize(nextSettings.blockSize);
       setImg2imgChecked(nextSettings.img2imgChecked);
       setResizeMode(nextSettings.resizeMode);
-      setSeedMode(nextSettings.seedMode);
-      setSeedText(nextSettings.seedText);
+      setSeedText(nextSettings.seed);
+      setSeedPinned(nextSettings.seedPinned);
     }
     setSteps(nextSettings.steps);
     setCfg(nextSettings.cfg);
@@ -4136,12 +4155,14 @@ export function App() {
       return null;
     }
     let seedArg: { seedMode: "random" | "fixed"; seed: number | null };
-    if (seedMode === "random") {
+    if (!seedPinned) {
+      // Unpinned: -1 (random) goes into the payload.
       seedArg = { seedMode: "random", seed: null };
     } else {
+      // Pinned: the field's current value is adopted.
       const s = Number(seedText);
-      if (!Number.isInteger(s) || s < 0 || s > 4294967295) {
-        setFormError("seed は 0〜4294967295 の整数で入力してください。");
+      if (!Number.isInteger(s) || s < -1 || s > 4294967295) {
+        setFormError("seed は -1〜4294967295 の整数で入力してください。");
         return null;
       }
       seedArg = { seedMode: "fixed", seed: s };
@@ -6563,60 +6584,38 @@ export function App() {
 
               <div>
                 <span className={labelCls}>seed</span>
-                <div className="flex border border-[var(--border)]" role="group" aria-label="seed の決め方">
-                  {(
-                    [
-                      { key: "random", label: "ランダム" },
-                      { key: "fixed", label: "固定" },
-                    ] as { key: SeedMode; label: string }[]
-                  ).map((o, i) => (
-                    <button
-                      key={o.key}
-                      type="button"
-                      aria-pressed={seedMode === o.key}
-                      onClick={() => {
-                        markSettingsImmediate();
-                        setSeedMode(o.key);
-                        // Picking fixed adopts the previous
-                        // generation's seed as the fixed value
-                        // (2026-11-26, folding in the old reuse
-                        // mode); with no previous seed yet, a
-                        // random value is adopted instead. The
-                        // field stays editable after.
-                        if (o.key === "fixed") {
-                          setSeedText(
-                            lastSeed != null
-                              ? String(lastSeed)
-                              : String(Math.floor(Math.random() * 4294967296)),
-                          );
-                        }
-                      }}
-                      className={`flex-1 px-2 py-2 text-sm ${
-                        seedMode === o.key ? "" : "bg-[var(--surface)]"
-                      }`}
-                      style={{
-                        borderLeft: i > 0 ? "1px solid var(--border)" : undefined,
-                        ...(seedMode === o.key
-                          ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
-                          : {}),
-                      }}
-                    >
-                      {o.label}
-                    </button>
-                  ))}
-                </div>
-                {seedMode === "fixed" && (
+                <div className="flex gap-1">
                   <input
                     {...FIELDS.createJob.seed}
-                    aria-label="固定 seed の値"
+                    id="seed-value"
+                    aria-label="seed の値"
                     inputMode="numeric"
                     value={seedText}
                     onChange={(e) => setSeedText(e.target.value)}
                     onBlur={flushSettingsSave}
-                    placeholder="例: 123456789"
-                    className={`${inputCls} ${MONO} mt-1`}
+                    className={`${inputCls} ${MONO} flex-1`}
                   />
-                )}
+                  <button
+                    type="button"
+                    aria-pressed={seedPinned}
+                    aria-label="seed をピン留め"
+                    onClick={() => {
+                      markSettingsImmediate();
+                      setSeedPinned((v) => !v);
+                    }}
+                    className="flex items-center px-2.5"
+                    style={{
+                      border: "1px solid var(--border)",
+                      ...(seedPinned
+                        ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                        : { backgroundColor: "var(--surface)" }),
+                    }}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
+                      <path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z" />
+                    </svg>
+                  </button>
+                </div>
               </div>
 
               <details>
