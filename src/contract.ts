@@ -11,18 +11,12 @@ import { z } from "zod";
 
 const jobView = z.object({
   id: z.number(),
-  kind: z.enum(["generate", "check"]),
-  // True for direct jobs (jobKey prefix "priv-"): generation jobs run
-  // sd_job_priv.py directly through the privileged handler (no spawned
-  // worker), and the client polls pollGenerationJob for them.
-  // Worker-era generation jobs and check jobs report false.
-  direct: z.boolean(),
+  kind: z.enum(["generate"]),
   status: z.enum(["queued", "running", "completed", "failed"]),
   phase: z.string().nullable(),
   phaseUpdatedAt: z.string().nullable(),
   model: z.string().nullable(),
   prompt: z.string().nullable(),
-  extraNegative: z.string().nullable(),
   negativePrompt: z.string().nullable(),
   width: z.number().nullable(),
   height: z.number().nullable(),
@@ -45,9 +39,6 @@ const jobView = z.object({
   displayUrl: z.string().nullable(),
   usedParams: z.string().nullable(),
   loraHashes: z.string().nullable(),
-  checkModels: z.array(z.string()).nullable(),
-  checkCheckpoint: z.string().nullable(),
-  checkSamplers: z.number().nullable(),
   error: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -94,7 +85,6 @@ const generationRequest = z.object({
   // template, not by model — 2026-11-24). The checkpoint the run
   // actually used travels inside the payload's override_settings.
   model: z.string().min(1).max(200),
-  extraNegative: z.string().max(2000).default(""),
   // Editable full negative prompt (Parameter pane). Used verbatim
   // as the payload's negative_prompt. This field is the job
   // record's copy of the user's negative text.

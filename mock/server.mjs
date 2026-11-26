@@ -70,7 +70,7 @@ function seedJob(id, model, prompt, width, height, seed, sample, createdAt) {
   state.jobs.set(id, {
     id, kind: "generate", status: "completed", phase: null,
     phaseUpdatedAt: createdAt, model, prompt,
-    extraNegative: "", negativePrompt: "low quality, blurry",
+    negativePrompt: "low quality, blurry",
     width, height, seedMode: "random", seedInput: null,
     steps: 20, cfg: 5.5, sampler: "DPM++ 2M", scheduler: "Karras",
     mode: "txt2img", denoisingStrength: null,
@@ -95,9 +95,10 @@ async function seed() {
     await copyFixtureTo(`${job.sample}.png`, job.imageKey);
     await copyFixtureTo(`${job.sample}.display.jpg`, job.displayKey);
   }
-  // One listed save (from job 1) plus the unlisted 12719-0 seed file,
-  // so the stored save index seeds to 12719 like production and the
+  // One listed save (from job 1) plus the unlisted 12719-0 seed
+  // file; the stored save index is seeded to 12719 below, so the
   // client's first save becomes 12720.
+  state.saveIndex = 12719;
   await copyFixtureTo("sample-1.png", "saved/12713-3035825825.png");
   await copyFixtureTo("sample-1.display.jpg", "saved/12713-3035825825.display.jpg");
   await copyFixtureTo("sample-2.png", "saved/12719-0.png");
@@ -117,9 +118,9 @@ async function seed() {
 function jobView(j) {
   const completed = j.status === "completed";
   return {
-    id: j.id, kind: j.kind, direct: true, status: j.status,
+    id: j.id, kind: j.kind, status: j.status,
     phase: j.phase, phaseUpdatedAt: j.phaseUpdatedAt, model: j.model,
-    prompt: j.prompt, extraNegative: j.extraNegative,
+    prompt: j.prompt,
     negativePrompt: j.negativePrompt, width: j.width, height: j.height,
     seedMode: j.seedMode, seedInput: j.seedInput, steps: j.steps,
     cfg: j.cfg, sampler: j.sampler, scheduler: j.scheduler,
@@ -130,7 +131,6 @@ function jobView(j) {
     imageUrl: completed ? fileUrl(j.imageKey) : null,
     displayUrl: completed ? fileUrl(j.displayKey || j.imageKey) : null,
     usedParams: j.usedParams, loraHashes: j.loraHashes,
-    checkModels: null, checkCheckpoint: null, checkSamplers: null,
     error: j.error, createdAt: j.createdAt, updatedAt: j.updatedAt,
   };
 }
@@ -350,27 +350,11 @@ function jobProgress(job) {
 
 // --- save index (client-managed; mirrors the backend) ---------------------
 // The server only remembers the latest index it received and
-// hands it back at startup; the seed scan below runs once, on
-// first read, so the sequence continues from the saved files.
-async function scanSavedHighest() {
-  let names = [];
-  try {
-    names = await readdir(join(FILES, "saved"));
-  } catch {
-    names = [];
-  }
-  let max = null;
-  for (const name of names) {
-    const m = name.match(/^(\d+)-\d+\.(?:png|jpg)$/);
-    if (m) max = Math.max(max ?? 0, Number(m[1]));
-  }
-  return max;
-}
+// hands it back at startup; a fresh install starts at 0. The
+// seed below stores 12719 (as if a long-running install had
+// received it), so the client's first save becomes 12720.
 async function storedSaveIndex() {
-  if (state.saveIndex == null) {
-    state.saveIndex = (await scanSavedHighest()) ?? 0;
-  }
-  return state.saveIndex;
+  return state.saveIndex ?? 0;
 }
 async function indexFromArgs(args) {
   if (Number.isInteger(args.index) && args.index >= 0) return args.index;
@@ -566,7 +550,6 @@ const ACTIONS = {
     const job = {
       id, kind: "generate", status: "running", phase: "agent_starting",
       phaseUpdatedAt: nowIso(), model: args.model, prompt: args.prompt,
-      extraNegative: args.extraNegative ?? "",
       negativePrompt: args.negativePrompt ?? null,
       width: args.width, height: args.height,
       seedMode: args.seedMode ?? "random", seedInput: args.seed ?? null,

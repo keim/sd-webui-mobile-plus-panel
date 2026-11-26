@@ -114,10 +114,6 @@ export const FIELDS = {
     "model": {
       "name": "model"
     },
-    "extraNegative": {
-      "name": "extraNegative",
-      "maxLength": 2000
-    },
     "negativePrompt": {
       "name": "negativePrompt",
       "maxLength": 4000

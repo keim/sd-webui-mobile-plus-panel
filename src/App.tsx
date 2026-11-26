@@ -1205,7 +1205,7 @@ export function App() {
   // checks the run on the host, advances the display phase, and
   // completes/fails the job server-side.
   const activeDirectIds = useMemo(
-    () => genJobs.filter((j) => j.direct && isActive(j)).map((j) => j.id),
+    () => genJobs.filter((j) => isActive(j)).map((j) => j.id),
     [genJobs],
   );
   const activeDirectKey = activeDirectIds.join(",");
@@ -4219,7 +4219,6 @@ export function App() {
     return {
       prompt: prompt.trim(),
       model: activeTemplate.title,
-      extraNegative: "",
       negativePrompt,
       width: w,
       height: h,
