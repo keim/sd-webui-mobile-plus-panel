@@ -1,11 +1,12 @@
 // Per-action request field attributes (min/max/maxLength/step/required),
-// inlined from the contract's zod schemas. In the Space this was produced
-// at bundle time by the @hatch/space-sdk/fields macro reading
-// server/src/actions.ts; here it is a checked-in snapshot of that output
-// (generated 2026-11-22). Regenerate it if contract.ts limits change.
+// inlined from the contract's zod schemas. Originally produced at bundle
+// time by the @hatch/space-sdk/fields macro; here it is a checked-in
+// snapshot of that output (generated 2026-11-22). Regenerate it if
+// contract.ts limits change.
 
 export const FIELDS = {
-  "getStandardNegative": {},
+  "getModelList": {},
+  "getSamplerList": {},
   "getWordDictionary": {},
   "getTextSnippets": {},
   "saveTextSnippets": {
@@ -174,25 +175,6 @@ export const FIELDS = {
       "minLength": 1,
       "required": true,
       "maxLength": 80
-    },
-    "baseEnabled": {
-      "name": "baseEnabled"
-    },
-    "photorealisticWeight": {
-      "name": "photorealisticWeight",
-      "type": "number",
-      "step": "any",
-      "required": true,
-      "min": -1,
-      "max": 2
-    },
-    "comicloWeight": {
-      "name": "comicloWeight",
-      "type": "number",
-      "step": "any",
-      "required": true,
-      "min": 0,
-      "max": 1
     },
     "mode": {
       "name": "mode"

@@ -9,7 +9,6 @@ type Job = ApiResponse<typeof api, "listJobs">["jobs"][number];
 type UploadImage = ApiResponse<typeof api, "listUploadImages">["uploads"][number];
 type EditorSource = ApiResponse<typeof api, "getEditorSource">["source"];
 type GenerationArgs = ApiRequest<typeof api, "createJob">;
-type ModelKey = "wai" | "pornmaster" | "zimage";
 type SeedMode = "random" | "fixed" | "reuse";
 // Pane keys. There is no tab bar and no flick navigation: the
 // Editor pane is the hub, and panes are reached only through
@@ -139,65 +138,14 @@ function DownloadButton(props: {
   );
 }
 
-const MODELS: {
-  key: ModelKey;
-  label: string;
-  shortLabel: string;
-  checkpoint: string;
-  steps: number;
-  cfg: number;
-  sampler: string;
-  scheduler: string;
-}[] = [
-  {
-    key: "wai",
-    label: "wai",
-    shortLabel: "wai",
-    checkpoint: "waiNSFWIllustrious_v140",
-    steps: 20,
-    cfg: 5.5,
-    sampler: "DPM++ 2M",
-    scheduler: "Karras",
-  },
-  {
-    key: "pornmaster",
-    label: "pornmaster",
-    shortLabel: "pm",
-    checkpoint: "pornmasterPro_realismILV4",
-    steps: 20,
-    cfg: 5.5,
-    sampler: "DPM++ 2M",
-    scheduler: "Karras",
-  },
-  {
-    key: "zimage",
-    label: "z-image",
-    shortLabel: "zimg",
-    checkpoint: "z-image-turbo-quant-bundle",
-    steps: 10,
-    cfg: 1,
-    sampler: "Euler",
-    scheduler: "Beta",
-  },
-];
-
-// --- Generation templates (2026-11-24) ---
-// Selection is by TEMPLATE, not by model (keim, 2026-11-24):
-// each template names its checkpoint and carries the negative
-// prompt plus every parameter that used to switch with the
-// model. Templates are managed as JSON and edited in the
-// Parameter pane. The three built-ins below correspond to the
-// former MODELS entries; MODELS itself now only seeds their
-// defaults (checkpoint + recipe values).
-const BUILTIN_TEMPLATES: { key: ModelKey; title: string }[] = [
-  { key: "wai", title: "WAI nsfw テンプレート" },
-  { key: "pornmaster", title: "Pornmaster テンプレート" },
-  { key: "zimage", title: "Z-Image テンプレート" },
-];
-
-function builtinOfTitle(title: string) {
-  return BUILTIN_TEMPLATES.find((b) => b.title === title) ?? null;
-}
+// --- Generation templates ---
+// Selection is by TEMPLATE, not by model: each template names
+// its checkpoint (chosen from the live checkpoint list) and
+// carries the negative prompt plus every generation parameter.
+// Templates are managed as JSON and edited in the Parameter
+// pane. There are no built-in templates and no per-model
+// recipes: a fresh install starts from the single common
+// default template (see defaultTemplate below).
 
 // One generation template: the JSON-facing unit of selection.
 // `settings` is the parameter record (the former per-model
@@ -297,13 +245,6 @@ function applyPromptTemplate(
 }
 
 // The models' built-in templates. wai's reproduces the former
-// fixed style base (photorealistic + comiclo LoRA ahead of the
-// prompt); the other models send the prompt as-is.
-const DEFAULT_TEMPLATES: Record<ModelKey, string> = {
-  wai: "(photorealistic: %写実的:0:2:0.1:1.2%), <lora:comiclo-xl-pony:%コミック調:0:1:0.05:0.7%>, %prompt%",
-  pornmaster: "%prompt%",
-  zimage: "%prompt%",
-};
 
 // Fetch an image URL (the workbench's own /files/ route) and
 // return its raw base64 — the client now carries the img2img init
@@ -323,7 +264,7 @@ async function fetchImageAsBase64(url: string): Promise<string> {
 }
 
 // A labelled single-button toggle in the Parameter pane
-// (keim, 2026-11-23): the button shows the current state's
+// (2026-11-23): the button shows the current state's
 // label and flips the value on tap; the accent fill marks the
 // active (true) state, matching the mode toggle cell.
 function ToggleSetting(props: {
@@ -353,20 +294,6 @@ function ToggleSetting(props: {
       </button>
     </div>
   );
-}
-
-// Base display for history: each tag appears only when its weight
-// is non-zero (baseEnabled abolished in the 2026-11-19 overhaul).
-// Legacy jobs recorded with baseEnabled false and non-zero weights
-// still read as "付けない" out of respect for what was sent.
-function baseStringOf(job: Job): string | null {
-  if (job.baseEnabled === false && job.negativePrompt == null) return null;
-  const parts: string[] = [];
-  const pw = job.photorealisticWeight;
-  const cw = job.comicloWeight;
-  if (pw != null && pw !== 0) parts.push(`(photorealistic: ${pw})`);
-  if (cw != null && cw !== 0) parts.push(`<lora:comiclo-xl-pony:${cw}>`);
-  return parts.length > 0 ? parts.join(", ") : null;
 }
 
 const SIZE_PRESETS: { key: string; label: string; w: number; h: number }[] = [
@@ -519,31 +446,6 @@ function drawAspectPreview(
   }
 }
 
-const SAMPLERS = [
-  "DPM++ 2M",
-  "DPM++ 2M SDE",
-  "DPM++ SDE",
-  "DPM2",
-  "DPM++ 2S a",
-  "Euler",
-  "Euler a",
-  "DDIM",
-  "LMS",
-  "Heun",
-  "UniPC",
-  "Restart",
-];
-
-const SCHEDULERS = [
-  "Karras",
-  "Exponential",
-  "Normal",
-  "Simple",
-  "Beta",
-  "DDIM Uniform",
-  "SGM Uniform",
-  "Align Your Steps",
-];
 
 const MONO = "font-mono tabular-nums";
 
@@ -659,15 +561,10 @@ async function fileToDisplayJpegBase64(file: File): Promise<string | null> {
   }
 }
 
-// Display text for a job record's model field. New records
-// carry the generation template's title, shown as-is; older
-// ones carry a model key, resolved to its built-in template's
-// title.
+// Display text for a job record's model field: records carry
+// the generation template's title, shown as-is.
 function modelLabel(key: string | null): string {
-  if (key == null) return "";
-  const byKey = BUILTIN_TEMPLATES.find((b) => b.key === key);
-  if (byKey) return byKey.title;
-  return key;
+  return key ?? "";
 }
 
 // --- Word prediction (port of SD WebUI Mobile Plus CandidateOperations) ---
@@ -781,7 +678,7 @@ type SettingsSnapshot = {
   // override_settings_restore_afterwards (default false) and the
   // inpaint trio (fill / full-res / full-res padding).
   // include_init_images stays a fixed false in the composition —
-  // keim asked for no control for it (2026-11-23).
+  // no control is offered for it (2026-11-23).
   restoreAfterwards: boolean;
   inpaintingFill: number;
   inpaintFullRes: boolean;
@@ -914,13 +811,10 @@ function restoredRecord(
   if (steps != null) next.steps = steps;
   const cfg = savedString(saved.cfg);
   if (cfg != null) next.cfg = cfg;
-  if (typeof saved.sampler === "string" && SAMPLERS.includes(saved.sampler)) {
+  if (typeof saved.sampler === "string" && saved.sampler !== "") {
     next.sampler = saved.sampler;
   }
-  if (
-    typeof saved.scheduler === "string" &&
-    SCHEDULERS.includes(saved.scheduler)
-  ) {
+  if (typeof saved.scheduler === "string" && saved.scheduler !== "") {
     next.scheduler = saved.scheduler;
   }
   if (typeof saved.img2imgChecked === "boolean") {
@@ -974,64 +868,14 @@ function restoredRecord(
   return settingsSnapshotOf(next);
 }
 
-// One model's factory defaults: the app-wide initial values, with
-// steps / cfg / sampler / scheduler from the model's recipe and
-// the model-linked style / denoise presets (wai gets the standard
-// base — photorealistic 1.2 / comiclo 0.7, denoise 0.35; the other
-// models get a neutral style and denoise 0.5). Used on a model's
-// first use and by the Parameter pane's reset button.
-function defaultSettingsFor(key: ModelKey): SettingsSnapshot {
-  const recipe = MODELS.find((m) => m.key === key) ?? MODELS[0]!;
-  return settingsSnapshotOf({
-    promptTemplate: DEFAULT_TEMPLATES[key],
-    templateValues: templateParamDefaults(DEFAULT_TEMPLATES[key]),
-    sizeKey: "3:4",
-    width: "1088",
-    height: "1472",
-    pixelSize: DEFAULT_PIXEL_SIZE,
-    blockSize: DEFAULT_BLOCK_SIZE,
-    seedMode: "random",
-    seedText: "",
-    steps: String(recipe.steps),
-    cfg: String(recipe.cfg),
-    sampler: recipe.sampler,
-    scheduler: recipe.scheduler,
-    img2imgChecked: false,
-    denoisingStrength: key === "wai" ? "0.35" : "0.5",
-    resizeMode: 0,
-    maskMode: "masked",
-    maskBlur: "0",
-    brushSize: "100",
-    penTool: "pen",
-    restoreAfterwards: false,
-    inpaintingFill: 1,
-    inpaintFullRes: false,
-    inpaintFullResPadding: "32",
-  });
-}
 
-// One built-in template with factory defaults. The negative
-// default is the standard negative for wai / pornmaster (their
-// recipes use it verbatim) and empty for z-image.
-function builtinTemplate(key: ModelKey, standardNegative: string): TemplateRecord {
-  const meta = BUILTIN_TEMPLATES.find((b) => b.key === key) ?? BUILTIN_TEMPLATES[0]!;
-  const recipe = MODELS.find((m) => m.key === key) ?? MODELS[0]!;
-  return {
-    title: meta.title,
-    model: recipe.checkpoint,
-    negativePrompt: key === "zimage" ? "" : standardNegative,
-    settings: defaultSettingsFor(key),
-  };
-}
-
-// The common default template (keim, 2026-11-24): one set of
-// defaults for every model, used for a fresh install's single
-// template and by the Parameter pane's reset button. The image
-// size / seed / mode fields below are the app-wide initial
-// values (they are not template parameters; they only seed the
-// form on a fresh install's full apply).
-const DEFAULT_TEMPLATE_NEGATIVE =
-  "(worst quality, low quality, lowres: 1.5), bad anatomy, bad hands, missing fingers, extra digit, long neck, long body, missing arms, missing legs, extra arms, extra legs, watermark, text";
+// The common default template: one set of defaults for every
+// model, used for a fresh install's single template and by
+// the Parameter pane's reset button. The image size / seed /
+// mode fields in it are the app-wide initial values (they are
+// not template parameters; they only seed the form on a fresh
+// install's full apply). Its model is empty: the first
+// checkpoint of the live list is adopted once it loads.
 
 function commonDefaultSettings(): SettingsSnapshot {
   return settingsSnapshotOf({
@@ -1065,67 +909,12 @@ function commonDefaultSettings(): SettingsSnapshot {
 function defaultTemplate(): TemplateRecord {
   return {
     title: "テンプレート",
-    model: MODELS[0]!.checkpoint,
-    negativePrompt: DEFAULT_TEMPLATE_NEGATIVE,
+    model: "",
+    negativePrompt: "",
     settings: commonDefaultSettings(),
   };
 }
 
-// Parses a saved settings JSON into the per-model bundle. The
-// current format is { model, models: { <key>: record } }; legacy
-// flat snapshots (a record with a model field) are read as the
-// record of their model, merged over that model's defaults.
-function parseSettingsBundle(saved: Record<string, unknown>): {
-  model: ModelKey;
-  records: Partial<Record<ModelKey, SettingsSnapshot>>;
-} | null {
-  if (Object.keys(saved).length === 0) return null;
-  const records: Partial<Record<ModelKey, SettingsSnapshot>> = {};
-  let model: ModelKey = "wai";
-  if (
-    typeof saved.model === "string" &&
-    MODELS.some((m) => m.key === saved.model)
-  ) {
-    model = saved.model as ModelKey;
-  }
-  const models = saved.models;
-  if (models && typeof models === "object" && !Array.isArray(models)) {
-    for (const m of MODELS) {
-      const rec = (models as Record<string, unknown>)[m.key];
-      if (rec && typeof rec === "object" && !Array.isArray(rec)) {
-        records[m.key] = restoredRecord(
-          rec as Record<string, unknown>,
-          defaultSettingsFor(m.key),
-        );
-      }
-    }
-  } else if (Object.keys(saved).length > 0) {
-    const rec = restoredRecord(saved, defaultSettingsFor(model));
-    // Legacy saves predate templates: their photorealistic /
-    // comiclo weights become the values of the default template's
-    // parameters, so a tuned weight survives the migration
-    // instead of snapping back to the defaults.
-    if (rec.promptTemplate === DEFAULT_TEMPLATES[model]) {
-      const labels = new Set(
-        parseTemplateParams(rec.promptTemplate).map((p) => p.label),
-      );
-      const tv = { ...rec.templateValues };
-      const pw = savedString(saved.photorealisticWeight);
-      if (pw != null && labels.has("写実的")) {
-        const n = Number(pw);
-        if (Number.isFinite(n)) tv["写実的"] = n;
-      }
-      const cw = savedString(saved.comicloWeight);
-      if (cw != null && labels.has("コミック調")) {
-        const n = Number(cw);
-        if (Number.isFinite(n)) tv["コミック調"] = n;
-      }
-      rec.templateValues = tv;
-    }
-    records[model] = rec;
-  }
-  return { model, records };
-}
 
 // The canonical saved-settings JSON (v2): the template list with
 // the active template's title. Fixed key order so the dirty
@@ -1153,72 +942,51 @@ function templatesBundleJson(
   });
 }
 
-// Parses the saved settings into the template list. v2 saves are
-// read directly; v1 saves (the per-model bundle, or a legacy flat
-// snapshot) are migrated: one built-in template per model with
-// its remembered record, the shared saved negative going to the
-// active model's template and the recipe defaults to the others.
+// Parses the saved settings into the template list (v2 format
+// only; older formats are not migrated, so a save that does not
+// parse reads as a fresh install). Missing settings fields are
+// filled from the common defaults.
 function parseTemplatesBundle(
   saved: Record<string, unknown>,
-  standardNegative: string,
-  savedNegative: string | null,
 ): { activeTitle: string; templates: TemplateRecord[] } | null {
   if (Object.keys(saved).length === 0) return null;
-  if (saved.version === 2 && Array.isArray(saved.templates)) {
-    const templates: TemplateRecord[] = [];
-    const seen = new Set<string>();
-    for (const raw of saved.templates) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-      const e = raw as Record<string, unknown>;
-      const title = typeof e.title === "string" ? e.title : "";
-      const model = typeof e.model === "string" ? e.model : "";
-      if (!title || !model || seen.has(title)) continue;
-      seen.add(title);
-      const builtin = builtinOfTitle(title);
-      const base = builtin
-        ? builtinTemplate(builtin.key, standardNegative)
-        : builtinTemplate("wai", standardNegative);
-      const settings =
-        e.settings && typeof e.settings === "object" && !Array.isArray(e.settings)
-          ? restoredRecord(e.settings as Record<string, unknown>, base.settings)
-          : base.settings;
-      let additionalModules: string[] | undefined;
-      if (Array.isArray(e.additionalModules)) {
-        const mods = e.additionalModules.filter(
-          (m): m is string => typeof m === "string" && m !== "",
-        );
-        if (mods.length > 0) additionalModules = mods;
-      }
-      templates.push({
-        title,
-        model,
-        negativePrompt:
-          typeof e.negativePrompt === "string" ? e.negativePrompt : "",
-        ...(additionalModules ? { additionalModules } : {}),
-        settings,
-      });
+  if (saved.version !== 2 || !Array.isArray(saved.templates)) return null;
+  const templates: TemplateRecord[] = [];
+  const seen = new Set<string>();
+  for (const raw of saved.templates) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const e = raw as Record<string, unknown>;
+    const title = typeof e.title === "string" ? e.title : "";
+    if (!title || seen.has(title)) continue;
+    seen.add(title);
+    const base = commonDefaultSettings();
+    const settings =
+      e.settings && typeof e.settings === "object" && !Array.isArray(e.settings)
+        ? restoredRecord(e.settings as Record<string, unknown>, base)
+        : base;
+    let additionalModules: string[] | undefined;
+    if (Array.isArray(e.additionalModules)) {
+      const mods = e.additionalModules.filter(
+        (m): m is string => typeof m === "string" && m !== "",
+      );
+      if (mods.length > 0) additionalModules = mods;
     }
-    if (templates.length === 0) return null;
-    const activeTitle =
-      typeof saved.activeTitle === "string" &&
-      templates.some((t) => t.title === saved.activeTitle)
-        ? saved.activeTitle
-        : templates[0]!.title;
-    return { activeTitle, templates };
+    templates.push({
+      title,
+      model: typeof e.model === "string" ? e.model : "",
+      negativePrompt:
+        typeof e.negativePrompt === "string" ? e.negativePrompt : "",
+      ...(additionalModules ? { additionalModules } : {}),
+      settings,
+    });
   }
-  const bundle = parseSettingsBundle(saved);
-  if (!bundle) return null;
-  const templates = BUILTIN_TEMPLATES.map((b) => {
-    const t = builtinTemplate(b.key, standardNegative);
-    const rec = bundle.records[b.key];
-    if (rec) t.settings = rec;
-    if (b.key === bundle.model) {
-      if (savedNegative != null) t.negativePrompt = savedNegative;
-    }
-    return t;
-  });
-  const active = BUILTIN_TEMPLATES.find((b) => b.key === bundle.model);
-  return { activeTitle: active?.title ?? templates[0]!.title, templates };
+  if (templates.length === 0) return null;
+  const activeTitle =
+    typeof saved.activeTitle === "string" &&
+    templates.some((t) => t.title === saved.activeTitle)
+      ? saved.activeTitle
+      : templates[0]!.title;
+  return { activeTitle, templates };
 }
 
 function restoredPrompt(
@@ -1443,11 +1211,11 @@ export function App() {
   const activeDirectKey = activeDirectIds.join(",");
   // Live sampling progress piggybacked on the poll response
   // (display-only, never persisted), as a per-job display state
-  // machine. illu's raw counters cannot be shown as-is: during
+  // machine. the server's raw counters cannot be shown as-is: during
   // preparation (model load, init-image encode) sampling_step sits
   // at 0 while sampling_steps still holds the payload steps, an
   // img2img total then switches mid-run to the denoise-adjusted
-  // real count, and once sampling finishes illu falls back to idle
+  // real count, and once sampling finishes the server falls back to idle
   // and the readings stop. So:
   // - `started` flips only when sampling is observably under way
   //   (a poll returns step >= 1 or fraction > 0); before that the
@@ -1516,7 +1284,7 @@ export function App() {
                 };
               }
               // No progress on this poll: after sampling has
-              // started that means it has finished (illu went
+              // started that means it has finished (the server went
               // idle) or the read failed — either way the display
               // completes the count instead of freezing mid-way.
               // Before the start it means nothing yet.
@@ -1726,14 +1494,6 @@ export function App() {
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
   }, [editorPopup]);
-
-  // Standard negative (initial value for the Parameter pane's
-  // editable negative editor, before any saved state exists).
-  const standardNegativeQuery = useQuery({
-    queryKey: ["standardNegative"],
-    queryFn: () => api.getStandardNegative({}),
-  });
-  const standardNegative = standardNegativeQuery.data?.standardNegative ?? "";
 
   // --- Editor / Inpaint image slot state ---
   // The current image lives in ONE server-side slot
@@ -1997,19 +1757,16 @@ export function App() {
   const [cfg, setCfg] = useState("5.5");
   const [sampler, setSampler] = useState("DPM++ 2M");
   const [scheduler, setScheduler] = useState("Karras");
-  const [promptTemplate, setPromptTemplate] = useState(
-    DEFAULT_TEMPLATES.wai,
-  );
-  const [templateValues, setTemplateValues] = useState<
-    Record<string, number>
-  >(() => templateParamDefaults(DEFAULT_TEMPLATES.wai));
+  const [promptTemplate, setPromptTemplate] = useState("%prompt%");
+  const [templateValues, setTemplateValues] =
+    useState<Record<string, number>>({});
   // The Parameter pane's template fields (title / model /
   // positive template text) work on drafts; the active template
   // only changes when the 更新 button commits them. The drafts
   // are re-synced from the active template at every structural
   // change (switch, restore, duplicate, delete, reset, commit).
   const [titleDraft, setTitleDraft] = useState("テンプレート");
-  const [modelDraft, setModelDraft] = useState(MODELS[0]!.checkpoint);
+  const [modelDraft, setModelDraft] = useState("");
   const [templateTextDraft, setTemplateTextDraft] = useState("%prompt%");
   const [templateFieldsError, setTemplateFieldsError] =
     useState<string | null>(null);
@@ -2095,7 +1852,7 @@ export function App() {
   // checkpoint list (backend getModelList -> /sdapi/v1/sd-models),
   // so checkpoints installed later (the Anima family) are
   // selectable without a panel update. There is deliberately no
-  // static fallback list (keim, 2026-11-26): when the fetch fails
+  // static fallback list (2026-11-26): when the fetch fails
   // the list is empty and only the current draft (appended below
   // when it is not in the list) remains selectable.
   const modelListQuery = useQuery({
@@ -2112,6 +1869,18 @@ export function App() {
   const modelListRef = useRef<{ name: string; stem: string }[]>([]);
   modelListRef.current = fetchedModels;
 
+  // The sampler / scheduler lists likewise come from the live
+  // server (backend getSamplerList -> /sdapi/v1/samplers and
+  // /sdapi/v1/schedulers), so they cannot drift from what Forge
+  // actually offers. While the fetch is pending or has failed,
+  // the selects show just the current value.
+  const samplerListQuery = useQuery({
+    queryKey: ["samplerList"],
+    queryFn: () => api.getSamplerList({}),
+  });
+  const samplerOptions = samplerListQuery.data?.samplers ?? [];
+  const schedulerOptions = samplerListQuery.data?.schedulers ?? [];
+
   // Saved templates may carry the bare file stem (e.g.
   // waiNSFWIllustrious_v140) while the live list uses the
   // canonical model_name (illustrious_waiNSFWIllustrious_v140).
@@ -2122,13 +1891,17 @@ export function App() {
   // canonical value.
   useEffect(() => {
     if (fetchedModels.length === 0) return;
+    if (modelDraft === "") {
+      setModelDraft(fetchedModels[0]!.name);
+      return;
+    }
     if (fetchedModels.some((m) => m.name === modelDraft)) return;
     const byStem = fetchedModels.find((m) => m.stem === modelDraft);
     if (byStem) setModelDraft(byStem.name);
   }, [fetchedModels, modelDraft]);
 
   // The save index （保存インデクス） is managed HERE, in the
-  // browser (keim, 2026-11-23): it starts from the server's
+  // browser (2026-11-23): it starts from the server's
   // latest value (getWorkspaceState.saveIndex, applied once by
   // the restore effect), each save increments it and passes the
   // new value to the save action — which names the file with it
@@ -2238,6 +2011,22 @@ export function App() {
     settingsImmediateRef.current = true;
   }
 
+  // A template whose model is still empty (a fresh install's
+  // default before any checkpoint was chosen) adopts the first
+  // checkpoint of the live list once it loads, so a fresh install
+  // can generate without opening the Parameter pane first.
+  useEffect(() => {
+    if (fetchedModels.length === 0) return;
+    if (!activeTemplate || activeTemplate.model !== "") return;
+    const first = fetchedModels[0]!.name;
+    markSettingsImmediate();
+    setTemplates((prev) =>
+      prev.map((t) =>
+        t.title === activeTemplate.title ? { ...t, model: first } : t,
+      ),
+    );
+  }, [fetchedModels, activeTemplate]);
+
   function doSaveSettings(json: string) {
     if (json === lastSavedSettingsRef.current) return;
     lastSavedSettingsRef.current = json;
@@ -2282,27 +2071,16 @@ export function App() {
   // is the standard negative verbatim when nothing was saved), or
   // when either load failed, in which case the defaults stay and
   // saving is enabled with the current values as the baseline.
-  const negativeSeededRef = useRef(false);
   useEffect(() => {
     if (restoredRef.current) return;
-    if (workspaceQuery.isError || standardNegativeQuery.isError) {
+    if (workspaceQuery.isError) {
       restoredRef.current = true;
-      if (standardNegative && !negativeSeededRef.current) {
-        negativeSeededRef.current = true;
-        setNegativePrompt(standardNegative);
-        lastSavedPromptRef.current = JSON.stringify({
-          prompt,
-          negativePrompt: standardNegative,
-        } satisfies PromptSnapshot);
-      } else {
-        lastSavedPromptRef.current = promptJsonRef.current;
-      }
+      lastSavedPromptRef.current = promptJsonRef.current;
       lastSavedSettingsRef.current = settingsJsonRef.current;
       return;
     }
     const data = workspaceQuery.data;
     if (!data) return;
-    if (standardNegativeQuery.data == null) return;
     restoredRef.current = true;
     // The save index starts from the server's latest value.
     if (saveIndexRef.current == null && typeof data.saveIndex === "number") {
@@ -2314,11 +2092,7 @@ export function App() {
       typeof savedPromptRecord.negativePrompt === "string"
         ? savedPromptRecord.negativePrompt
         : null;
-    const parsed = parseTemplatesBundle(
-      parseJsonRecord(data.settings),
-      standardNegative,
-      savedNegative,
-    );
+    const parsed = parseTemplatesBundle(parseJsonRecord(data.settings));
     let restoredNegative: string | null = null;
     if (parsed) {
       const active =
@@ -2336,7 +2110,7 @@ export function App() {
       );
     } else {
       // Fresh install: exactly one template — the common default
-      // (keim, 2026-11-24). When no negative was ever saved, the
+      // (2026-11-24). When no negative was ever saved, the
       // default is applied to the live form as well, so the app
       // starts at the default values; a saved prompt negative
       // (user data from a settings-less state) still wins for
@@ -2357,13 +2131,12 @@ export function App() {
     }
     const nextPrompt = restoredPrompt(savedPromptRecord, {
       prompt,
-      negativePrompt: standardNegative,
+      negativePrompt: "",
     });
-    negativeSeededRef.current = true;
     setPrompt(nextPrompt.prompt);
     // The negative comes from the active template when settings
     // were restored; only a settings-less install falls back to
-    // the prompt snapshot's negative (or the standard negative).
+    // the prompt snapshot's negative.
     if (restoredNegative == null) {
       setNegativePrompt(nextPrompt.negativePrompt);
       restoredNegative = nextPrompt.negativePrompt;
@@ -2375,12 +2148,7 @@ export function App() {
     // The restore effect re-runs only when the queries settle; the
     // state values it merges over are the startup defaults.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    workspaceQuery.data,
-    workspaceQuery.isError,
-    standardNegativeQuery.data,
-    standardNegativeQuery.isError,
-  ]);
+  }, [workspaceQuery.data, workspaceQuery.isError]);
 
   // Settings saving: discrete changes (flagged via
   // markSettingsImmediate) save at once; everything else — the
@@ -2516,7 +2284,7 @@ export function App() {
   // (the two slots are independent; using the source's size for
   // the plate showed the wrong dimensions whenever the
   // displayed image differed from the source, and no size at
-  // all while no source was set — keim's report, 2026-11-23).
+  // all while no source was set — reported 2026-11-23).
   // The size-mismatch dot and 「画像サイズをあわせる」 are the
   // opposite: they follow the SOURCE's size (maskNatural).
   const [editorNatural, setEditorNatural] = useState<{
@@ -3369,7 +3137,7 @@ export function App() {
   // width / height / pixelSize / blockSize), the generation mode
   // (img2imgChecked), the resize mode, and the seed method
   // (seedMode + the fixed seed value) are NOT template
-  // parameters (keim, 2026-11-23): with skipGlobal they are
+  // parameters (2026-11-23): with skipGlobal they are
   // left as-is, so switching templates or resetting one never
   // moves them. Only the startup restore applies them (from
   // the last-active template's record, which the save flow
@@ -3413,11 +3181,23 @@ export function App() {
   function syncTemplateFields(record: TemplateRecord) {
     setTitleDraft(record.title);
     // Normalize a bare-stem model to the canonical model_name
-    // when the live list is already known (see modelListRef).
-    const byStem = modelListRef.current.find(
+    // when the live list is already known (see modelListRef); a
+    // record with no model yet (a fresh install's default) adopts
+    // the list's first checkpoint. Doing this here, not only in
+    // the draft effect, matters: if the restore's sync and the
+    // effect's adoption land in the same commit, the intermediate
+    // draft value never commits and the effect does not re-fire.
+    const fetched = modelListRef.current;
+    const byStem = fetched.find(
       (m) => m.stem === record.model && m.name !== record.model,
     );
-    setModelDraft(byStem ? byStem.name : record.model);
+    setModelDraft(
+      record.model === "" && fetched.length > 0
+        ? fetched[0]!.name
+        : byStem
+          ? byStem.name
+          : record.model,
+    );
     setTemplateTextDraft(record.settings.promptTemplate);
     setTemplateFieldsError(null);
   }
@@ -3443,8 +3223,7 @@ export function App() {
   }
 
   // The Parameter pane's reset button: the active template's
-  // parameters and negative back to the common defaults (keim,
-  // 2026-11-24). The template's title, model, and additional
+  // parameters and negative back to the common defaults (// 2026-11-24). The template's title, model, and additional
   // modules — its identity — are kept.
   function resetTemplateSettings() {
     markSettingsImmediate();
@@ -4257,19 +4036,6 @@ export function App() {
       setFormError("CFG は 0〜30 の数値で入力してください。");
       return null;
     }
-    // The job record still carries the two canonical style
-    // weights (the history's base display reads them): they are
-    // the template values of the 写実的 / コミック調 parameters
-    // when the model's template defines them, else 0. The full
-    // provenance is the payload itself (usedParams).
-    const pw = Math.min(
-      2,
-      Math.max(-1, templateValues["写実的"] ?? 0),
-    );
-    const cw = Math.min(
-      1,
-      Math.max(0, templateValues["コミック調"] ?? 0),
-    );
     let seedArg: { seedMode: "random" | "fixed"; seed: number | null };
     if (seedMode === "random") {
       seedArg = { seedMode: "random", seed: null };
@@ -4292,8 +4058,7 @@ export function App() {
     // - no source image: the txt2img side generates txt2img,
     //   but with the i2i/inpaint side selected (or from the
     //   Inpaint pane, which has nothing to paint on) it is a
-    //   form error — no silent txt2img fallback (keim,
-    //   2026-11-23).
+    //   form error — no silent txt2img fallback (//   2026-11-23).
     // - source image + toggle on the txt2img side → txt2img,
     //   even though an image is set (Editor). The Inpaint pane is
     //   the exception: it keeps its "generate with the target
@@ -4435,7 +4200,7 @@ export function App() {
       payload.denoising_strength = i2i.denoisingStrength;
       // Inpaint always resizes with Crop (resize_mode 1) — the
       // panel's resize cell shows Crop and is disabled while the
-      // mode is inpaint (keim, 2026-11-23). Plain img2img uses
+      // mode is inpaint (2026-11-23). Plain img2img uses
       // the panel's selection.
       payload.resize_mode = mask ? 1 : resizeMode;
       payload.include_init_images = false;
@@ -4462,9 +4227,6 @@ export function App() {
       cfg: cf,
       sampler,
       scheduler,
-      baseEnabled: false,
-      photorealisticWeight: pw,
-      comicloWeight: cw,
       ...seedArg,
       ...i2i,
       payload,
@@ -4818,7 +4580,7 @@ export function App() {
   // matters against the source, so the dot and
   // 「画像サイズをあわせる」 follow the source — NOT the
   // displayed Editor image, whose own size is what the name
-  // plate shows (keim, 2026-11-23). No source image (or its
+  // plate shows (2026-11-23). No source image (or its
   // size not measured yet) — no dot.
   const sizeMismatch =
     sourceImage.kind !== "none" &&
@@ -5253,8 +5015,7 @@ export function App() {
   // switching to the i2i side reveals the source image area in
   // the prompt row, whose tap uploads the source. Generation
   // with the i2i side selected but no source image set is a
-  // form error, not a silent txt2img fallback (keim,
-  // 2026-11-23). The i2i side is shown in the accent fill (the
+  // form error, not a silent txt2img fallback (// 2026-11-23). The i2i side is shown in the accent fill (the
   // active-family signal, matching the image area's thick frame
   // while a source image is set); the txt2img side stays plain.
   // Automatic switches to the i2i side: uploading, and a user
@@ -6714,7 +6475,9 @@ export function App() {
                   <div>
                     <label htmlFor="sampler" className="block text-xs text-[var(--dim)] mb-1">サンプラー</label>
                     <select id="sampler" value={sampler} onChange={(e) => { markSettingsImmediate(); setSampler(e.target.value); }} className={inputCls}>
-                      {SAMPLERS.map((s) => (
+                      {[...samplerOptions,
+                        ...(samplerOptions.includes(sampler) ? [] : [sampler]),
+                      ].map((s) => (
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </select>
@@ -6722,7 +6485,9 @@ export function App() {
                   <div>
                     <label htmlFor="scheduler" className="block text-xs text-[var(--dim)] mb-1">スケジューラ</label>
                     <select id="scheduler" value={scheduler} onChange={(e) => { markSettingsImmediate(); setScheduler(e.target.value); }} className={inputCls}>
-                      {SCHEDULERS.map((s) => (
+                      {[...schedulerOptions,
+                        ...(schedulerOptions.includes(scheduler) ? [] : [scheduler]),
+                      ].map((s) => (
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </select>
@@ -6964,14 +6729,6 @@ export function App() {
                         <dd>{`img2img（denoise ${selected.denoisingStrength ?? "—"}）`}</dd>
                       </div>
                     )}
-                    <div className="flex gap-2">
-                      <dt className="text-[var(--dim)] shrink-0">調整</dt>
-                      <dd className="break-all">
-                        {selected.photorealisticWeight == null && selected.comicloWeight == null
-                          ? "未記録"
-                          : baseStringOf(selected) ?? "付けない"}
-                      </dd>
-                    </div>
                     {selected.negativePrompt != null && (
                       <div className="flex gap-2">
                         <dt className="text-[var(--dim)] shrink-0">ネガティブ</dt>
@@ -7017,7 +6774,7 @@ export function App() {
                     <div className="mt-2 flex gap-2">
                       <DownloadButton
                         url={selected.imageUrl}
-                        fileName={`illu-sd-job${selected.id}-seed${selected.resultSeed ?? "x"}.png`}
+                        fileName={`sd-job${selected.id}-seed${selected.resultSeed ?? "x"}.png`}
                         onSettled={reconcileAfterDownload}
                         className="flex flex-1 items-center justify-center px-4 py-3 text-center text-base font-semibold rounded-[var(--radius)] disabled:opacity-50"
                         style={{ backgroundColor: "var(--accent2)", color: "var(--on-accent2)", minHeight: "3rem" }}

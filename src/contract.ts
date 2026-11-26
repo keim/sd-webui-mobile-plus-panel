@@ -1,9 +1,8 @@
-// Action contract for the workbench UI, transcribed from the Space's
-// server/src/actions.ts (illu-sd-wakusupesu-v2) on 2026-11-22: the shared
-// zod view schemas verbatim, plus each client-facing action's request and
-// response schema. Worker-internal actions of the Space (createCheck,
-// completeJob, completeCheck, updatePhase, failJob) are intentionally not
-// part of this contract — the extension backend replaces both sides.
+// Action contract for the workbench UI: the shared zod view
+// schemas, plus each client-facing action's request and response
+// schema. Worker-internal actions (createCheck, completeJob,
+// completeCheck, updatePhase, failJob) are intentionally not part
+// of this contract — the extension backend replaces both sides.
 //
 // This file is the reference the FastAPI backend under /mobileplus/actions
 // will be implemented against. It is imported type-only by src/api.ts.
@@ -33,9 +32,6 @@ const jobView = z.object({
   cfg: z.number().nullable(),
   sampler: z.string().nullable(),
   scheduler: z.string().nullable(),
-  baseEnabled: z.boolean().nullable(),
-  photorealisticWeight: z.number().nullable(),
-  comicloWeight: z.number().nullable(),
   // Generation mode: "txt2img" | "img2img" (null on rows recorded
   // before the column existed; reads as txt2img).
   mode: z.string().nullable(),
@@ -68,7 +64,7 @@ const pollResponse = z.object({
   error: z.string().nullable(),
   // Display-only live sampling progress, piggybacked on the poll:
   // present only when this poll found the job in its generating
-  // phase AND illu reported a job in flight or a sampling signal
+  // phase AND the server reported a job in flight or a sampling signal
   // (see fetchSdProgress). The raw counters are passed through as
   // reported — including pre-sampling readings (step 0 while the
   // model loads / the init image encodes, with steps still at the
@@ -76,10 +72,10 @@ const pollResponse = z.object({
   // CLIENT owns the display rules built on these counters (show
   // nothing until sampling has observably started, fix the total
   // at that moment, treat a lost reading after the start as
-  // sampling-complete); `fraction` (illu's progress ratio) rides
+  // sampling-complete); `fraction` (the server's progress ratio) rides
   // along because it is one of the two sampling-start signals.
   // Step counts only — no percentage, no ETA, and never an
-  // in-progress image (the host progress route asks illu with
+  // in-progress image (the host progress route asks the server with
   // skip_current_image=true). Never stored in the DB.
   progress: z
     .object({
@@ -111,12 +107,6 @@ const generationRequest = z.object({
   cfg: z.number().min(0).max(30),
   sampler: z.string().min(1).max(80),
   scheduler: z.string().min(1).max(80),
-  // baseEnabled is abolished (2026-11-19): kept optional only so
-  // older clients still validate; composePayload ignores it and
-  // decides purely from the two weights (0 = tag omitted).
-  baseEnabled: z.boolean().default(false),
-  photorealisticWeight: z.number().min(-1).max(2),
-  comicloWeight: z.number().min(0).max(1),
   // img2img (i2i): mode "img2img" runs the job against an init
   // image with denoisingStrength from the Editor pane. Which image
   // the init was: "job" = the generated image of sourceJobId, or
@@ -222,14 +212,17 @@ const saveImageResponse = z.object({
 });
 
 export const Actions = {
-  getStandardNegative: {
-    request: z.object({}),
-    response: z.object({ standardNegative: z.string() }),
-  },
   getModelList: {
     request: z.object({}),
     response: z.object({
       models: z.array(z.object({ name: z.string(), stem: z.string() })),
+    }),
+  },
+  getSamplerList: {
+    request: z.object({}),
+    response: z.object({
+      samplers: z.array(z.string()),
+      schedulers: z.array(z.string()),
     }),
   },
   getWordDictionary: {

@@ -1,11 +1,10 @@
 // Standalone client bundler for the workbench UI.
 //
-// Mirrors the canonical Space client build (Bun.build over the HTML entry,
-// production NODE_ENV, hashed asset names, tailwind plugin) so the output
-// is interchangeable with the Space's client/dist. The one Space-specific
-// define kept is __HATCH_SPACE_PLATFORM_VERSION__: the vendored SDK client
-// reads it (typeof-guarded) to enable its readable-failure messages, and
-// the Space this UI was migrated from ran platformVersion 29.
+// Bun.build over the HTML entry, production NODE_ENV, hashed asset
+// names, tailwind plugin. The one platform define kept is
+// __HATCH_SPACE_PLATFORM_VERSION__: the vendored SDK client reads it
+// (typeof-guarded) to enable its readable-failure messages; the value
+// 29 matches the SDK version vendored under vendor/space-sdk.
 
 import { basename } from "node:path";
 import tailwindPlugin from "bun-plugin-tailwind";

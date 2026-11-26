@@ -1,4 +1,4 @@
-// Mock backend for workbench UI development without illu.
+// Mock backend for workbench UI development without a live WebUI.
 //
 // Serves the built UI (../dist) under /mobileplus/ and implements the
 // full 22-action contract (see src/contract.ts) with in-memory state
@@ -28,9 +28,6 @@ const nowIso = () => new Date().toISOString();
 const fileUrl = (key) => (key ? `/mobileplus/files/${key}` : null);
 
 // --- fixtures ------------------------------------------------------------
-const STANDARD_NEGATIVE = (
-  await readFile(join(FIXTURES, "standard-negative.txt"), "utf8")
-).trim();
 const seedDictionary = JSON.parse(
   await readFile(join(FIXTURES, "dictionary.json"), "utf8"),
 );
@@ -51,7 +48,7 @@ const state = {
   prompt: "",
 };
 
-const MODEL_STEPS = { wai: 20, pornmaster: 20, zimage: 10 };
+const MODEL_STEPS = { "Template A": 20, "Template B": 20, "Template C": 10 };
 const GEN_MS = 7000; // simulated generation duration
 
 async function putFile(key, bytes) {
@@ -73,10 +70,9 @@ function seedJob(id, model, prompt, width, height, seed, sample, createdAt) {
   state.jobs.set(id, {
     id, kind: "generate", status: "completed", phase: null,
     phaseUpdatedAt: createdAt, model, prompt,
-    extraNegative: "", negativePrompt: STANDARD_NEGATIVE,
+    extraNegative: "", negativePrompt: "low quality, blurry",
     width, height, seedMode: "random", seedInput: null,
     steps: 20, cfg: 5.5, sampler: "DPM++ 2M", scheduler: "Karras",
-    baseEnabled: true, photorealisticWeight: 1, comicloWeight: 0.7,
     mode: "txt2img", denoisingStrength: null,
     resultSeed: seed, imageKey: `jobs/${id}.png`,
     displayKey: `jobs/${id}.display.jpg`,
@@ -92,9 +88,9 @@ async function seed() {
   await mkdir(FILES, { recursive: true });
   const t = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
-  seedJob(1, "wai", "1girl, solo, seaside, summer", 1088, 1472, 1111111111, "sample-1", iso(t - 7200e3));
-  seedJob(2, "pornmaster", "scenery, mountain, lake, sunset", 1472, 1088, 2222222222, "sample-2", iso(t - 3600e3));
-  seedJob(3, "zimage", "scenery, city, night, neon", 1984, 832, 3333333333, "sample-3", iso(t - 1800e3));
+  seedJob(1, "Template A", "1girl, solo, seaside, summer", 1088, 1472, 1111111111, "sample-1", iso(t - 7200e3));
+  seedJob(2, "Template B", "scenery, mountain, lake, sunset", 1472, 1088, 2222222222, "sample-2", iso(t - 3600e3));
+  seedJob(3, "Template C", "scenery, city, night, neon", 1984, 832, 3333333333, "sample-3", iso(t - 1800e3));
   for (const job of state.jobs.values()) {
     await copyFixtureTo(`${job.sample}.png`, job.imageKey);
     await copyFixtureTo(`${job.sample}.display.jpg`, job.displayKey);
@@ -127,9 +123,7 @@ function jobView(j) {
     negativePrompt: j.negativePrompt, width: j.width, height: j.height,
     seedMode: j.seedMode, seedInput: j.seedInput, steps: j.steps,
     cfg: j.cfg, sampler: j.sampler, scheduler: j.scheduler,
-    baseEnabled: j.baseEnabled,
-    photorealisticWeight: j.photorealisticWeight,
-    comicloWeight: j.comicloWeight, mode: j.mode,
+    mode: j.mode,
     denoisingStrength: j.denoisingStrength,
     canSendToEditor: completed && !!j.imageKey,
     resultSeed: j.resultSeed,
@@ -385,20 +379,29 @@ async function indexFromArgs(args) {
 
 // --- actions ---------------------------------------------------------------
 const ACTIONS = {
-  getStandardNegative: async () => ({ standardNegative: STANDARD_NEGATIVE }),
-  // Mirrors illu's live /sdapi/v1/sd-models (2026-11-26): the two
-  // illustrious checkpoints live in a subfolder, so their canonical
-  // model_name carries the illustrious_ prefix while their stem
-  // (what saved templates carry) does not.
+  // Synthetic checkpoint list with the same shapes as a real
+  // /sdapi/v1/sd-models reply: plain names, one subfolder-prefixed
+  // pair (canonical name vs bare stem), and a name with spaces.
   getModelList: async () => ({
     models: [
-      { name: "FlanimeAnima_v20", stem: "FlanimeAnima_v20" },
-      { name: "illustrious_pornmasterPro_realismILV4", stem: "pornmasterPro_realismILV4" },
-      { name: "illustrious_waiNSFWIllustrious_v140", stem: "waiNSFWIllustrious_v140" },
-      { name: "JANIMA29b_V1.1_bf16", stem: "JANIMA29b_V1.1_bf16" },
-      { name: "MiaoMiao RealSkin _Anima2.9b_v1_n", stem: "MiaoMiao RealSkin _Anima2.9b_v1_n" },
-      { name: "WAI-ANIMA1", stem: "WAI-ANIMA1" },
-      { name: "z-image-turbo-quant-bundle", stem: "z-image-turbo-quant-bundle" },
+      { name: "anime-base-1", stem: "anime-base-1" },
+      { name: "big-checkpoint-29b", stem: "big-checkpoint-29b" },
+      { name: "Example RealSkin _v1 n", stem: "Example RealSkin _v1 n" },
+      { name: "illustrious_checkpoint-a", stem: "checkpoint-a" },
+      { name: "illustrious_checkpoint-b", stem: "checkpoint-b" },
+      { name: "photo-checkpoint-1", stem: "photo-checkpoint-1" },
+      { name: "turbo-bundle-x", stem: "turbo-bundle-x" },
+    ],
+  }),
+  getSamplerList: async () => ({
+    samplers: [
+      "DPM++ 2M", "DPM++ 2M SDE", "DPM++ SDE", "DPM++ 3M SDE",
+      "DPM2", "DPM++ 2S a", "Euler", "Euler a", "DDIM", "LMS",
+      "Heun", "UniPC", "Restart",
+    ],
+    schedulers: [
+      "Karras", "Exponential", "Normal", "Simple", "Beta",
+      "DDIM Uniform", "SGM Uniform", "Align Your Steps",
     ],
   }),
   getWordDictionary: async () => ({
@@ -568,9 +571,7 @@ const ACTIONS = {
       width: args.width, height: args.height,
       seedMode: args.seedMode ?? "random", seedInput: args.seed ?? null,
       steps: args.steps, cfg: args.cfg, sampler: args.sampler,
-      scheduler: args.scheduler, baseEnabled: args.baseEnabled ?? false,
-      photorealisticWeight: args.photorealisticWeight,
-      comicloWeight: args.comicloWeight,
+      scheduler: args.scheduler,
       mode: args.mode ?? "txt2img",
       sourceJobId: args.sourceJobId ?? null,
       initSource: args.initSource ?? null,
@@ -748,5 +749,5 @@ const server = Bun.serve({
 
 console.log(
   `[mock] workbench mock at http://127.0.0.1:${server.port}/mobileplus/ ` +
-  `(25 actions, seeded jobs 1-3, generation ~${GEN_MS / 1000}s)`,
+  `(27 actions, seeded jobs 1-3, generation ~${GEN_MS / 1000}s)`,
 );
