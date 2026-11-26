@@ -312,9 +312,9 @@ function applyPromptTemplate(
   });
 }
 
-// The style cell's summary text: every parameter's current
-// value — sliders formatted, choices as their picked text —
-// joined with commas; unselected choices contribute nothing.
+// The style cell's summary text: the slider values only,
+// formatted and joined with commas (2026-11-27 — picked
+// choice texts are not composed into the label).
 function styleSummary(
   params: TemplateParam[],
   values: Record<string, TemplateValue>,
@@ -326,12 +326,38 @@ function styleSummary(
       parts.push(
         formatTemplateValue(typeof raw === "number" ? raw : p.def, p.step),
       );
-    } else {
-      const t = choiceSubstitution(p, values[p.key]);
-      if (t) parts.push(t.replaceAll(", ", ","));
     }
   }
   return parts.join(",");
+}
+
+// Lock badge shown at the top-left of the image that is
+// currently adopted as the img2img source (元画像) in the
+// list views (Editor history panel, List pane, Preview
+// strip) — 2026-11-27.
+function SourceLockBadge() {
+  return (
+    <span
+      data-source-lock="true"
+      aria-hidden="true"
+      className="absolute left-1 top-1 flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] px-1 text-[var(--text)]"
+      style={{ minHeight: "1rem" }}
+    >
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="4" y="11" width="16" height="9" />
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+      </svg>
+    </span>
+  );
 }
 
 // Fetch an image URL (the workbench's own /files/ route) and
@@ -1639,6 +1665,14 @@ export function App() {
       byteSize: null,
       fileName: null,
     };
+  // Whether a history job / upload is the image currently
+  // adopted as the img2img source (元画像): it carries the
+  // lock badge in the lists and is excluded from the List
+  // pane's bulk deletion (2026-11-27).
+  const isSourceJob = (id: number) =>
+    sourceImage.kind === "job" && sourceImage.jobId === id;
+  const isSourceUpload = (id: number) =>
+    sourceImage.kind === "upload" && sourceImage.uploadId === id;
   const editorSource: EditorSource =
     editorSourceQuery.data?.source ?? {
       kind: "none",
@@ -3222,7 +3256,10 @@ export function App() {
   );
 
   const isDeletable = (j: Job) => j.status === "completed" || j.status === "failed";
-  const deletableJobs = useMemo(() => history.filter(isDeletable), [history]);
+  const deletableJobs = useMemo(
+    () => history.filter((j) => isDeletable(j) && !isSourceJob(j.id)),
+    [history, sourceImage],
+  );
   const allDeletableSelected =
     deletableJobs.length > 0 && deletableJobs.every((j) => checkedIds.includes(j.id));
 
@@ -4116,9 +4153,22 @@ export function App() {
     setCheckedSavedIds(allSavedSelected ? [] : savedImages.map((s) => s.id));
   }
 
+  // The upload adopted as the img2img source is excluded
+  // from bulk deletion (2026-11-27), like the source job.
+  const selectableUploads = useMemo(
+    () => uploadImages.filter((u) => !isSourceUpload(u.id)),
+    [uploadImages, sourceImage],
+  );
   const allUploadsSelected =
-    uploadImages.length > 0 &&
-    uploadImages.every((u) => checkedUploadIds.includes(u.id));
+    selectableUploads.length > 0 &&
+    selectableUploads.every((u) => checkedUploadIds.includes(u.id));
+  useEffect(() => {
+    setCheckedUploadIds((prev) => {
+      const allowed = new Set(selectableUploads.map((u) => u.id));
+      const next = prev.filter((id) => allowed.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [selectableUploads]);
   function toggleCheckedUpload(id: number, checked: boolean) {
     setCheckedUploadIds((prev) =>
       checked ? [...prev, id] : prev.filter((x) => x !== id),
@@ -4126,7 +4176,7 @@ export function App() {
   }
   function toggleSelectAllUploads() {
     setCheckedUploadIds(
-      allUploadsSelected ? [] : uploadImages.map((u) => u.id),
+      allUploadsSelected ? [] : selectableUploads.map((u) => u.id),
     );
   }
 
@@ -5887,7 +5937,8 @@ export function App() {
                               : {}),
                           }}
                         >
-                          <img
+                          {isSourceUpload(u.id) && <SourceLockBadge />}
+                        <img
                             src={(u.displayUrl ?? u.imageUrl) ?? undefined}
                             alt=""
                             className="block h-full w-full object-cover"
@@ -5923,7 +5974,7 @@ export function App() {
                         type="button"
                         aria-label={`履歴 ${j.id} の画像を Editor に設定`}
                         onClick={() => setSourceFromPreview(j)}
-                        className="block aspect-square w-full overflow-hidden p-0"
+                        className="relative block aspect-square w-full overflow-hidden p-0"
                         style={{
                           minHeight: 0,
                           borderBottom: "1px solid var(--border)",
@@ -5932,6 +5983,7 @@ export function App() {
                             : {}),
                         }}
                       >
+                        {isSourceJob(j.id) && <SourceLockBadge />}
                         <img
                           src={j.displayUrl ?? undefined}
                           alt=""
@@ -5941,9 +5993,10 @@ export function App() {
                     ) : (
                       <div
                         key={`job-${j.id}`}
-                        className="aspect-square w-full overflow-hidden"
+                        className="relative aspect-square w-full overflow-hidden"
                         style={{ borderBottom: "1px solid var(--border)" }}
                       >
+                        {isSourceJob(j.id) && <SourceLockBadge />}
                         <img
                           src={j.displayUrl ?? undefined}
                           alt=""
@@ -6344,6 +6397,7 @@ export function App() {
                         className={thumbCls}
                         style={thumbStyle}
                       >
+                        {isSourceUpload(u.id) && <SourceLockBadge />}
                         <img
                           src={(u.displayUrl ?? u.imageUrl) ?? undefined}
                           alt=""
@@ -6384,7 +6438,9 @@ export function App() {
                       className={thumbCls}
                       style={thumbStyle}
                     >
-                      <img
+                      {isSourceJob(j.id) && <SourceLockBadge />}
+                        {isSourceJob(j.id) && <SourceLockBadge />}
+                        <img
                         src={j.displayUrl ?? undefined}
                         alt=""
                         className="block h-full w-full object-cover"
@@ -6989,19 +7045,20 @@ export function App() {
               <ul>
                 {history.map((j) => {
                   const deletable = isDeletable(j);
+                  const locked = isSourceJob(j.id);
                   const isChecked = checkedIds.includes(j.id);
                   const title = j.prompt ?? "";
                   return (
                   <li key={j.id} className="border-b border-[var(--border)]">
                     <div className="flex w-full items-center gap-2 px-3 py-2">
                       <label
-                        className={`flex shrink-0 items-center justify-center p-1 ${deletable ? "cursor-pointer" : "opacity-40"}`}
+                        className={`flex shrink-0 items-center justify-center p-1 ${deletable && !locked ? "cursor-pointer" : "opacity-40"}`}
                         onClick={(e) => e.stopPropagation()}
                       >
                         <input
                           type="checkbox"
                           checked={isChecked}
-                          disabled={!deletable}
+                          disabled={!deletable || locked}
                           onChange={(e) => toggleChecked(j.id, e.target.checked)}
                           className="h-5 w-5"
                           style={{ accentColor: "var(--accent)" }}
@@ -7015,7 +7072,10 @@ export function App() {
                         aria-label={`履歴 ${j.id}: ${title}（${statusLabel(j)}）`}
                       >
                         {j.displayUrl ? (
-                          <img src={j.displayUrl} alt="" className="h-16 w-16 shrink-0 object-cover" />
+                          <span className="relative shrink-0">
+                            <img src={j.displayUrl} alt="" className="block h-16 w-16 object-cover" />
+                            {locked && <SourceLockBadge />}
+                          </span>
                         ) : (
                           <span className="flex h-16 w-16 shrink-0 items-center justify-center bg-[var(--surface-alt)] text-xs text-[var(--dim)]">
                             {statusLabel(j)}
@@ -7287,18 +7347,20 @@ export function App() {
               )}
               <ul>
                 {uploadImages.map((u) => {
+                  const locked = isSourceUpload(u.id);
                   const isChecked = checkedUploadIds.includes(u.id);
                   const thumb = u.displayUrl ?? u.imageUrl;
                   return (
                   <li key={u.id} className="border-b border-[var(--border)]">
                     <div className="flex w-full items-center gap-2 px-3 py-2">
                       <label
-                        className="flex shrink-0 cursor-pointer items-center justify-center p-1"
+                        className={`flex shrink-0 items-center justify-center p-1 ${locked ? "opacity-40" : "cursor-pointer"}`}
                         onClick={(e) => e.stopPropagation()}
                       >
                         <input
                           type="checkbox"
                           checked={isChecked}
+                          disabled={locked}
                           onChange={(e) => toggleCheckedUpload(u.id, e.target.checked)}
                           className="h-5 w-5"
                           style={{ accentColor: "var(--accent)" }}
@@ -7312,7 +7374,10 @@ export function App() {
                         aria-label={`アップロード画像 ${u.fileName ?? u.storedName}`}
                       >
                         {thumb ? (
-                          <img src={thumb} alt="" className="h-16 w-16 shrink-0 object-cover" />
+                          <span className="relative shrink-0">
+                            <img src={thumb} alt="" className="block h-16 w-16 object-cover" />
+                            {locked && <SourceLockBadge />}
+                          </span>
                         ) : (
                           <span className="flex h-16 w-16 shrink-0 items-center justify-center bg-[var(--surface-alt)] text-xs text-[var(--dim)]">
                             画像なし
