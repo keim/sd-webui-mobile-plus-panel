@@ -6354,15 +6354,20 @@ export function App() {
                   ))}
                 </div>
               )}
-              <div className="grid grid-cols-4 gap-2 p-2" role="group" aria-label="加工操作">
+              <div
+                className="grid"
+                role="group"
+                aria-label="加工操作"
+                style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
+              >
                 <button
                   type="button"
                   aria-label="色調"
                   aria-pressed={toneOpen}
                   onClick={() => setToneOpen((v) => !v)}
-                  className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--text)] rounded-[var(--radius)]"
+                  className={`flex items-center justify-center px-1 py-0 text-sm font-semibold ${toneOpen ? "" : "bg-[var(--surface)]"}`}
                   style={{
-                    minHeight: "2.75rem",
+                    minHeight: "2.5rem",
                     ...(toneOpen
                       ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
                       : {}),
@@ -6377,8 +6382,8 @@ export function App() {
                     disabled
                     aria-hidden="true"
                     tabIndex={-1}
-                    className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--text)] rounded-[var(--radius)] opacity-40"
-                    style={{ minHeight: "2.75rem" }}
+                    className="flex items-center justify-center px-1 py-0 bg-[var(--surface)]"
+                    style={{ minHeight: "2.5rem" }}
                   />
                 ))}
                 <button
@@ -6414,8 +6419,8 @@ export function App() {
                       });
                     }
                   }}
-                  className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-sm font-semibold text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
-                  style={{ minHeight: "2.75rem" }}
+                  className="flex items-center justify-center px-1 py-0 bg-[var(--surface)] text-sm font-semibold disabled:opacity-50"
+                  style={{ minHeight: "2.5rem" }}
                 >
                   保存
                 </button>
@@ -6609,15 +6614,8 @@ export function App() {
                       strokeLinejoin="round"
                       aria-hidden="true"
                     >
-                      <line x1="21" x2="14" y1="4" y2="4" />
-                      <line x1="10" x2="3" y1="4" y2="4" />
-                      <line x1="21" x2="12" y1="12" y2="12" />
-                      <line x1="8" x2="3" y1="12" y2="12" />
-                      <line x1="21" x2="16" y1="20" y2="20" />
-                      <line x1="12" x2="3" y1="20" y2="20" />
-                      <line x1="14" y1="2" y2="6" />
-                      <line x1="8" y1="10" y2="14" />
-                      <line x1="16" y1="18" y2="22" />
+                      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      <path d="m15 5 4 4" />
                     </svg>
                   </button>
                   {renderEditorImageButtons(previewAdoptButton)}
