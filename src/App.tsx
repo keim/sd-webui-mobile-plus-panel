@@ -5670,6 +5670,10 @@ export function App() {
               <textarea
                 {...FIELD_PROPS.createJob.prompt}
                 id="prompt"
+                lang="en"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 aria-label="プロンプト"
                 ref={promptRef}
                 value={prompt}
@@ -6672,6 +6676,10 @@ export function App() {
                 <textarea
                   {...FIELD_PROPS.createJob.negativePrompt}
                   id="negative-prompt"
+                  lang="en"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
                   aria-label="ネガティブプロンプト"
                   value={negativePrompt}
                   onChange={(e) => setNegativePrompt(e.target.value)}
