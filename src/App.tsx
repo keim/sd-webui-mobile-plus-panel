@@ -517,15 +517,23 @@ function calculateAspectSize(
 // inside it. The caller passes ratioW/ratioH as NaN when there is
 // nothing valid to preview (no selection, unparseable dimensions),
 // in which case only the background and guides are drawn.
-// Pinch zoom + drag pan for a full-area image (the Preview and
-// 画像加工 panes). The transform applies to the <img> itself
-// (transform-origin: center); the focal-point math keeps the
-// content point under the fingers / cursor stationary while
-// scaling. Scale clamps to 1..5; at scale 1 the translation
-// resets to 0. A double click resets the view, and the wheel
-// zooms around the cursor. `resetKey` changing (another image,
-// or the pane being left) resets the view.
-function useImageZoom(resetKey: string | null) {
+// Pinch zoom for a full-area image (the Preview, 画像加工 and
+// Inpaint panes). Movement comes only from the pinch gesture
+// itself — two fingers travelling together pan the view; a
+// single pointer never moves it (2026-11-28 spec change). The
+// transform applies to the image element (transform-origin:
+// center); the focal-point math keeps the content point under
+// the fingers / cursor stationary while scaling. Scale clamps
+// to 1..5; at scale 1 the translation resets to 0. A double
+// click resets the view, and the wheel zooms around the cursor.
+// `resetKey` changing (another image, or the pane being left)
+// resets the view. `onPinchStart` fires when a second pointer
+// lands (the Inpaint pane uses it to cancel the mask stroke a
+// pinch would otherwise smear).
+function useImageZoom(
+  resetKey: string | null,
+  opts?: { onPinchStart?: () => void },
+) {
   const [view, setView] = useState({ scale: 1, tx: 0, ty: 0 });
   const areaRef = useRef<HTMLDivElement | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
@@ -597,13 +605,11 @@ function useImageZoom(resetKey: string | null) {
   const handlers = {
     onPointerDown: (e: ReactPointerEvent) => {
       e.preventDefault();
-      try {
-        (e.currentTarget as Element).setPointerCapture(e.pointerId);
-      } catch {
-        // A synthetic or already-released pointer: the gesture
-        // still works without capture.
-      }
+      // No explicit pointer capture: touch pointers are captured
+      // implicitly to their target, and a child that manages its
+      // own capture (the Inpaint mask canvas) must keep it.
       pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointersRef.current.size === 2) opts?.onPinchStart?.();
       beginGesture();
     },
     onPointerMove: (e: ReactPointerEvent) => {
@@ -634,15 +640,9 @@ function useImageZoom(resetKey: string | null) {
             ty: g.focal.y + dy - py * scale,
           }),
         );
-      } else if (pts.length === 1 && p0) {
-        const dx = p0.x - g.lastX;
-        const dy = p0.y - g.lastY;
-        g.lastX = p0.x;
-        g.lastY = p0.y;
-        if (view.scale > 1) {
-          setView((v) => clampView({ scale: v.scale, tx: v.tx + dx, ty: v.ty + dy }));
-        }
       }
+      // A single pointer never moves the view (spec change
+      // 2026-11-28): panning happens only inside the pinch.
     },
     onPointerUp: (e: ReactPointerEvent) => {
       pointersRef.current.delete(e.pointerId);
@@ -692,7 +692,7 @@ function useImageZoom(resetKey: string | null) {
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [resetKey]);
 
   return {
     areaRef,
@@ -2223,6 +2223,10 @@ export function App() {
   const processZoom = useImageZoom(
     tab === "process" ? (editorSource.displayUrl ?? "none") : null,
   );
+  const inpaintZoom = useImageZoom(
+    tab === "inpaint" ? (sourceImage.displayUrl ?? "none") : null,
+    { onPinchStart: cancelMaskStrokeForPinch },
+  );
   useEffect(() => {
     if (saveNotice == null) return;
     const t = setTimeout(() => setSaveNotice(null), 4000);
@@ -2668,6 +2672,7 @@ export function App() {
   // mask exactly as it is (the mask is a pixel grid, so it maps
   // onto the new image unchanged).
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskSnapshotRef = useRef<HTMLCanvasElement | null>(null);
   const maskDisplayRef = useRef<HTMLCanvasElement | null>(null);
   const maskDrawingRef = useRef(false);
   const maskLastPointRef = useRef<{ x: number; y: number } | null>(null);
@@ -2920,10 +2925,28 @@ export function App() {
   }
 
   function onMaskPointerDown(e: ReactPointerEvent<HTMLCanvasElement>) {
+    // A second finger is the start of a pinch, never a stroke.
+    if (maskDrawingRef.current) return;
     const point = maskPointFromEvent(e);
     if (!point) return;
     e.preventDefault();
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // A synthetic or already-released pointer: painting still
+      // works without capture.
+    }
+    // Snapshot the mask so a pinch can roll this stroke back.
+    const src = maskCanvasRef.current;
+    if (src) {
+      if (!maskSnapshotRef.current) {
+        maskSnapshotRef.current = document.createElement("canvas");
+      }
+      const snap = maskSnapshotRef.current;
+      snap.width = src.width;
+      snap.height = src.height;
+      snap.getContext("2d")?.drawImage(src, 0, 0);
+    }
     maskDrawingRef.current = true;
     maskLastPointRef.current = point;
     // A line from the point to itself, with a round cap, paints
@@ -2950,6 +2973,27 @@ export function App() {
     }
     // Exact re-check at stroke end: an eraser pass may have
     // removed the last painted pixel.
+    setMaskPainted(maskHasPaint());
+  }
+
+  // A pinch starting mid-stroke cancels the stroke: the mask
+  // rolls back to the snapshot taken when the stroke began, so
+  // the pinch leaves no paint (and un-erases nothing either).
+  function cancelMaskStrokeForPinch() {
+    if (!maskDrawingRef.current) return;
+    maskDrawingRef.current = false;
+    maskLastPointRef.current = null;
+    const canvas = maskCanvasRef.current;
+    const snap = maskSnapshotRef.current;
+    if (canvas && snap && canvas.width === snap.width && canvas.height === snap.height) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(snap, 0, 0);
+      }
+      syncMaskDisplay();
+    }
     setMaskPainted(maskHasPaint());
   }
 
@@ -5541,13 +5585,25 @@ export function App() {
   }
 
   const inpaintImageDisplay = (
-    <div ref={inpaintBoxRef} className="relative min-h-0 min-w-0 flex-1">
+    <div
+      ref={(el) => {
+        inpaintBoxRef.current = el;
+        inpaintZoom.areaRef.current = el;
+      }}
+      className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
+    >
       {sourceImage.kind !== "none" && sourceImage.displayUrl ? (
         <>
+          <div
+            {...inpaintZoom.handlers}
+            className="absolute inset-0"
+            style={{ transform: inpaintZoom.transform, touchAction: "none" }}
+          >
           <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
             <img
               src={sourceImage.displayUrl}
               alt="元画像"
+              draggable={false}
               className="h-full w-full object-contain"
             />
           </div>
@@ -5574,6 +5630,7 @@ export function App() {
               }}
             />
           )}
+          </div>
           {editorPopup === "brush" && (
             <div
               aria-hidden="true"
