@@ -46,6 +46,8 @@ const state = {
   snippets: JSON.stringify(["masterpiece, best quality", "1girl, solo"]),
   settings: "",
   prompt: "",
+  saveSettingsCalls: 0,
+  savePromptCalls: 0,
 };
 
 const MODEL_STEPS = { "Template A": 20, "Template B": 20, "Template C": 10 };
@@ -395,11 +397,16 @@ const ACTIONS = {
     state.snippets = JSON.stringify(args.snippets ?? []);
     return { ok: true };
   },
-  getWorkspaceState: async () => ({
+  getWorkspaceState: async () => {
+    if (process.env.MOCK_FAIL_WORKSPACE === "1") {
+      throw new Error("simulated workspace load failure");
+    }
+    return {
     settings: state.settings,
     prompt: state.prompt,
     saveIndex: await storedSaveIndex(),
-  }),
+    };
+  },
   setSaveIndex: async (args) => {
     if (!Number.isInteger(args.index) || args.index < 0 || args.index > 999999999) {
       return { ok: false, error: "保存インデクスは 0 以上の整数で指定してください。" };
@@ -408,10 +415,12 @@ const ACTIONS = {
     return { ok: true, error: null };
   },
   saveSettings: async (args) => {
+    state.saveSettingsCalls += 1;
     state.settings = String(args.settings ?? "");
     return { ok: true };
   },
   savePrompt: async (args) => {
+    state.savePromptCalls += 1;
     state.prompt = String(args.prompt ?? "");
     return { ok: true };
   },
@@ -779,6 +788,13 @@ const server = Bun.serve({
         return new Response("not found", { status: 404 });
       }
       return new Response(Bun.file(filePath));
+    }
+    if (path === "/__mock/state" && req.method === "GET") {
+      return Response.json({
+        saveSettingsCalls: state.saveSettingsCalls,
+        savePromptCalls: state.savePromptCalls,
+        settingsEmpty: state.settings === "",
+      });
     }
     if (path === "/mobileplus" || path.startsWith("/mobileplus/")) {
       const rel = path.slice("/mobileplus/".length) || "index.html";

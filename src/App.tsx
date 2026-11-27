@@ -2337,6 +2337,19 @@ export function App() {
   // edits committed to the server via setSaveIndex so they
   // survive restarts. It is NOT part of the per-model settings.
   const [saveIndexText, setSaveIndexText] = useState("");
+  // First-run initialization gate: on a fresh install (no saved
+  // settings on the server) the app asks 「初期化しますか？」 and
+  // saves NOTHING to the server until the user answers はい
+  // (2026-11-28). Declining keeps the session save-free, and the
+  // next visit asks again.
+  const [initConfirmOpen, setInitConfirmOpen] = useState(false);
+  const initPendingRef = useRef(false);
+  // Saved settings could not be loaded (request failed, or the
+  // stored value cannot be parsed): saving stays disabled so a
+  // default-looking state can never overwrite the real settings
+  // (the 2026-11-28 incident, where a failed startup load wiped
+  // the user's templates).
+  const [workspaceLoadFailed, setWorkspaceLoadFailed] = useState(false);
   const saveIndexRef = useRef<number | null>(null);
   function nextSaveIndex(): number {
     const base =
@@ -2471,6 +2484,24 @@ export function App() {
     });
   }
 
+  // 「はい」 on the initialization popup: the initial settings
+  // are written to the server now, and normal saving begins.
+  function confirmInitialize() {
+    setInitConfirmOpen(false);
+    initPendingRef.current = false;
+    restoredRef.current = true;
+    lastSavedPromptRef.current = promptJsonRef.current;
+    lastSavedSettingsRef.current = null;
+    doSaveSettings(settingsJsonRef.current);
+  }
+
+  // 「いいえ」: the popup closes, but the save gate stays shut
+  // for the whole session (initPendingRef / restoredRef are
+  // untouched), so nothing reaches the server.
+  function declineInitialize() {
+    setInitConfirmOpen(false);
+  }
+
   // Flush a pending debounced settings save right away (numeric
   // inputs call this on blur).
   function flushSettingsSave() {
@@ -2493,22 +2524,59 @@ export function App() {
     doSavePrompt(promptJsonRef.current);
   }
 
-  // One-time restore at startup. Runs when the saved state AND the
-  // standard negative have arrived (the negative editor's default
-  // is the standard negative verbatim when nothing was saved), or
-  // when either load failed, in which case the defaults stay and
-  // saving is enabled with the current values as the baseline.
+  // One-time restore at startup. A load failure (the request
+  // failed, or stored settings exist but cannot be parsed) NEVER
+  // enables saving: the defaults stay on screen behind a warning
+  // banner with a retry, and the server's settings stay untouched.
+  // A true fresh install (no stored settings at all) applies the
+  // defaults to the form but likewise saves nothing until the
+  // user confirms initialization in the popup.
   useEffect(() => {
-    if (restoredRef.current) return;
+    if (restoredRef.current || initPendingRef.current) return;
     if (workspaceQuery.isError) {
-      restoredRef.current = true;
-      lastSavedPromptRef.current = promptJsonRef.current;
-      lastSavedSettingsRef.current = settingsJsonRef.current;
+      setWorkspaceLoadFailed(true);
       return;
     }
     const data = workspaceQuery.data;
     if (!data) return;
+    const earlyParsed = parseTemplatesBundle(parseJsonRecord(data.settings));
+    if (!earlyParsed) {
+      const rawSettings =
+        typeof data.settings === "string" ? data.settings.trim() : "";
+      if (rawSettings !== "") {
+        setWorkspaceLoadFailed(true);
+        return;
+      }
+      // Fresh install: defaults on the form, popup open, and the
+      // save gate stays shut until confirmInitialize runs. The
+      // save index is not part of the gated settings: it applies
+      // here too, exactly as on the normal restore path.
+      if (saveIndexRef.current == null && typeof data.saveIndex === "number") {
+        saveIndexRef.current = data.saveIndex;
+        setSaveIndexText(String(data.saveIndex));
+      }
+      initPendingRef.current = true;
+      setInitConfirmOpen(true);
+      const def = defaultTemplate();
+      setTemplates([def]);
+      setActiveTitle(def.title);
+      syncTemplateFields(def);
+      const savedRec = parseJsonRecord(data.prompt);
+      const savedNeg =
+        typeof savedRec.negativePrompt === "string"
+          ? savedRec.negativePrompt
+          : null;
+      if (savedNeg == null) {
+        applySettingsRecord(def.settings);
+        setNegativePrompt(def.negativePrompt);
+      } else {
+        setNegativePrompt(savedNeg);
+      }
+      setPrompt(restoredPrompt(savedRec, { prompt, negativePrompt: "" }).prompt);
+      return;
+    }
     restoredRef.current = true;
+    setWorkspaceLoadFailed(false);
     // The save index starts from the server's latest value.
     if (saveIndexRef.current == null && typeof data.saveIndex === "number") {
       saveIndexRef.current = data.saveIndex;
@@ -2519,7 +2587,7 @@ export function App() {
       typeof savedPromptRecord.negativePrompt === "string"
         ? savedPromptRecord.negativePrompt
         : null;
-    const parsed = parseTemplatesBundle(parseJsonRecord(data.settings));
+    const parsed = earlyParsed;
     let restoredNegative: string | null = null;
     if (parsed) {
       const active =
@@ -2536,13 +2604,10 @@ export function App() {
         parsed.templates,
       );
     } else {
-      // Fresh install: exactly one template — the common default
-      // (2026-11-24). When no negative was ever saved, the
-      // default is applied to the live form as well, so the app
-      // starts at the default values; a saved prompt negative
-      // (user data from a settings-less state) still wins for
-      // the live field, and the save flow then makes it the
-      // template's.
+      // Unreachable since 2026-11-28 (an unparseable bundle is
+      // handled above as a load failure / fresh install), kept as
+      // a defensive fallback: exactly one template — the common
+      // default (2026-11-24).
       const def = defaultTemplate();
       setTemplates([def]);
       setActiveTitle(def.title);
@@ -8266,6 +8331,64 @@ export function App() {
             </div>
           </div>
         )}
+
+      {/* --- workspace load failure banner: saving is disabled
+          until a reload succeeds, so the stored settings can
+          never be overwritten by the on-screen defaults --- */}
+      {workspaceLoadFailed && (
+        <div
+          role="alert"
+          className="fixed inset-x-0 top-0 z-40 flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 pb-2"
+          style={{ paddingTop: "max(0.5rem, env(safe-area-inset-top))" }}
+        >
+          <span className="text-xs leading-snug text-[var(--text)]">
+            保存済み設定を読み込めませんでした。設定を守るため、サーバへの保存は止まっています。
+          </span>
+          <button
+            type="button"
+            aria-label="設定を再読み込み"
+            onClick={() => void workspaceQuery.refetch()}
+            className="shrink-0 border border-[var(--border)] bg-[var(--surface-alt)] px-3 py-1.5 text-xs font-medium rounded-[var(--radius)]"
+          >
+            再読み込み
+          </button>
+        </div>
+      )}
+
+      {/* --- first-run initialization popup: nothing is saved to
+          the server until the user answers はい --- */}
+      {initConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backgroundColor: "rgba(38,24,58,0.55)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="初期化の確認"
+        >
+          <div className="w-full max-w-sm border border-[var(--border)] bg-[var(--surface)] p-5 rounded-[var(--radius)]">
+            <p className="text-sm leading-relaxed text-[var(--text)]">
+              SDWebUI mobile +がインストールされました。初期化しますか？
+            </p>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={declineInitialize}
+                className="flex-1 border border-[var(--border)] bg-[var(--surface-alt)] px-4 py-2.5 text-sm font-medium rounded-[var(--radius)]"
+              >
+                いいえ
+              </button>
+              <button
+                type="button"
+                onClick={confirmInitialize}
+                className="flex-1 px-4 py-2.5 text-sm font-semibold rounded-[var(--radius)]"
+                style={{ backgroundColor: "var(--accent)", color: "var(--accent-text)" }}
+              >
+                はい
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* --- delete confirmation dialog --- */}
       {showDeleteConfirm && (
