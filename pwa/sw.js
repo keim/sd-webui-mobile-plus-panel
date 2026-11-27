@@ -40,7 +40,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   // Actions API and image files: network only, never cached.
-  if (url.pathname.includes("/actions") || url.pathname.includes("/files/")) {
+  if (url.pathname.includes("/api/") || url.pathname.includes("/files/")) {
     return;
   }
   if (request.mode === "navigate") {

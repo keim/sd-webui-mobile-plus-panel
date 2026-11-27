@@ -690,25 +690,31 @@ const server = Bun.serve({
         SD_SCHEDULERS.map((name) => ({ name, label: name, aliases: [] })),
       );
     }
-    if (path === "/mobileplus/actions" && req.method === "POST") {
-      let body;
+    if (path.startsWith("/mobileplus/api/") && req.method === "POST") {
+      const action = decodeURIComponent(
+        path.slice("/mobileplus/api/".length),
+      );
+      let args;
       try {
-        body = await req.json();
+        args = await req.json();
       } catch {
         return Response.json({ error: "invalid JSON body" }, { status: 400 });
       }
-      const handler = ACTIONS[body.action];
+      const handler = ACTIONS[action];
       if (!handler) {
         return Response.json(
-          { error: `unknown action: ${body.action}` },
+          { error: `unknown action: ${action}` },
           { status: 404 },
         );
       }
       try {
-        const data = await handler(body.args ?? {});
-        return Response.json({ data });
+        const data = await handler(args ?? {});
+        return Response.json(data);
       } catch (e) {
-        return Response.json({ error: String(e?.message ?? e) }, { status: 500 });
+        return Response.json(
+          { error: String(e?.message ?? e) },
+          { status: 500 },
+        );
       }
     }
     if (path.startsWith("/mobileplus/files/")) {

@@ -1,33 +1,63 @@
-// Typed RPC client. Types come straight from `./contract` — no
-// codegen. `createActionClient` returns a proxy that POSTs `{action, args}`
-// to `./actions` and returns the typed response.
+// Plain fetch client for the workbench backend.
 //
-// `import type { Actions }` is type-only by design: the client bundle never
-// pulls in any server runtime (bun:sqlite, file APIs, etc.). With
-// `verbatimModuleSyntax: true`, dropping `type` is a compile error.
+// (2026-11-27: the Space actions protocol was retired. Each
+// action is a POST to `./api/<action>` with the args as the
+// JSON body; the result is the JSON response body itself, and
+// a failure is a non-2xx status with `{"error": "<message>"}`
+// — surfaced here as a thrown Error with that message, exactly
+// as the old client behaved. Types come straight from
+// `./types` — no codegen, no runtime schema.)
 
-import type { Actions } from "./contract";
-import { createActionClient } from "@hatch/space-sdk/client";
+import type { Actions } from "./types";
 
-export const api = createActionClient<typeof Actions>();
+export type ApiRequest<A extends keyof Actions> = Actions[A]["request"];
+export type ApiResponse<A extends keyof Actions> = Actions[A]["response"];
 
-// Re-exported for convenience so client code can do
-//
-//     import { api, type ApiResponse } from "./api";
-//     type Article = ApiResponse<typeof api, "listArticles">["articles"][number];
-//
-// They are also available directly from "@hatch/space-sdk/client".
-export type { ApiRequest, ApiResponse } from "@hatch/space-sdk/client";
+async function call(action: string, args: unknown): Promise<unknown> {
+  const res = await fetch(`./api/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args ?? {}),
+  });
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    // Non-JSON body: only the status matters below.
+  }
+  if (!res.ok) {
+    const message =
+      (body as { error?: string } | null)?.error ?? `HTTP ${res.status}`;
+    throw new Error(message);
+  }
+  return body;
+}
+
+type Api = {
+  [K in keyof Actions]: (
+    args: Actions[K]["request"],
+  ) => Promise<Actions[K]["response"]>;
+};
+
+export const api: Api = new Proxy(
+  {},
+  {
+    get: (_target, prop) => {
+      if (typeof prop !== "string") return undefined;
+      return (args: unknown) => call(prop, args);
+    },
+  },
+) as Api;
 
 // --- Direct sdapi reads (2026-11-27) ------------------------------
 // The workbench page is served by the WebUI itself, so the
 // read-only sdapi lists are fetched directly from the same
-// origin instead of through the actions protocol: the model
-// list for the template pane's dropdown, and the sampler /
-// scheduler name lists for the Parameter pane's selects. The
-// mapping mirrors what the removed backend actions returned:
-// name is the canonical model_name, stem the bare file stem
-// that saved templates may still carry.
+// origin instead of through the backend: the model list for
+// the template pane's dropdown, and the sampler / scheduler
+// name lists for the Parameter pane's selects. The mapping
+// mirrors what the removed backend actions returned: name is
+// the canonical model_name, stem the bare file stem that saved
+// templates may still carry.
 
 export interface SdModelEntry {
   name: string;

@@ -9,12 +9,30 @@ import {
   type ApiResponse,
 } from "./api";
 
-import { FIELDS } from "./fields";
+type Job = ApiResponse<"listJobs">["jobs"][number];
+type UploadImage = ApiResponse<"listUploadImages">["uploads"][number];
+type EditorSource = ApiResponse<"getEditorSource">["source"];
+type GenerationArgs = ApiRequest<"createJob">;
 
-type Job = ApiResponse<typeof api, "listJobs">["jobs"][number];
-type UploadImage = ApiResponse<typeof api, "listUploadImages">["uploads"][number];
-type EditorSource = ApiResponse<typeof api, "getEditorSource">["source"];
-type GenerationArgs = ApiRequest<typeof api, "createJob">;
+// Input props (name / type / step / min / max / maxLength /
+// required) for the form fields, as plain literals (2026-11-27:
+// formerly the FIELDS snapshot generated from the zod contract;
+// the values are HTML input attributes and live here now).
+const FIELD_PROPS = {
+  saveTextSnippets: {
+    snippets: { name: "snippets", maxLength: 2000 },
+  },
+  createJob: {
+    prompt: { name: "prompt", minLength: 1, required: true, maxLength: 4000 },
+    negativePrompt: { name: "negativePrompt", maxLength: 4000 },
+    width: { name: "width", type: "number", step: 1, required: true, min: 64, max: 4096 },
+    height: { name: "height", type: "number", step: 1, required: true, min: 64, max: 4096 },
+    seed: { name: "seed", type: "number", step: 1, min: 0, max: 4294967295 },
+    steps: { name: "steps", type: "number", step: 1, required: true, min: 1, max: 150 },
+    cfg: { name: "cfg", type: "number", step: "any", required: true, min: 0, max: 30 },
+    denoisingStrength: { name: "denoisingStrength", type: "number", step: "any", min: 0, max: 1 },
+  },
+} as const;
 // Pane keys. There is no tab bar and no flick navigation: the
 // Editor pane is the hub, and panes are reached only through
 // in-pane controls (image tap → Inpaint, the parameter panel's
@@ -4432,7 +4450,7 @@ export function App() {
     <div aria-label="スニペット編集">
     <div className="flex items-center gap-1.5">
       <input
-        {...FIELDS.saveTextSnippets.snippets}
+        {...FIELD_PROPS.saveTextSnippets.snippets}
         aria-label="スニペットのテキスト"
         value={snippetEdit.value}
         onChange={(e) => {
@@ -4587,7 +4605,7 @@ export function App() {
         <div className="flex-1">
           <label htmlFor="width" className="block text-xs text-[var(--dim)] mb-1">幅</label>
           <input
-            {...FIELDS.createJob.width}
+            {...FIELD_PROPS.createJob.width}
             id="width"
             inputMode="numeric"
             value={width}
@@ -4601,7 +4619,7 @@ export function App() {
         <div className="flex-1">
           <label htmlFor="height" className="block text-xs text-[var(--dim)] mb-1">高さ</label>
           <input
-            {...FIELDS.createJob.height}
+            {...FIELD_PROPS.createJob.height}
             id="height"
             inputMode="numeric"
             value={height}
@@ -5495,7 +5513,7 @@ export function App() {
         <span className={MONO}>{editorDenoise}</span>
       </label>
       <input
-        {...FIELDS.createJob.denoisingStrength}
+        {...FIELD_PROPS.createJob.denoisingStrength}
         id="denoise-slider"
         aria-label="img2img デノイズ値"
         type="range"
@@ -5649,7 +5667,7 @@ export function App() {
               }}
             >
               <textarea
-                {...FIELDS.createJob.prompt}
+                {...FIELD_PROPS.createJob.prompt}
                 id="prompt"
                 aria-label="プロンプト"
                 ref={promptRef}
@@ -6651,7 +6669,7 @@ export function App() {
               <div>
                 <label htmlFor="negative-prompt" className={labelCls}>ネガティブプロンプト</label>
                 <textarea
-                  {...FIELDS.createJob.negativePrompt}
+                  {...FIELD_PROPS.createJob.negativePrompt}
                   id="negative-prompt"
                   aria-label="ネガティブプロンプト"
                   value={negativePrompt}
@@ -6665,7 +6683,7 @@ export function App() {
                 <span className={labelCls}>seed</span>
                 <div className="flex gap-1">
                   <input
-                    {...FIELDS.createJob.seed}
+                    {...FIELD_PROPS.createJob.seed}
                     id="seed-value"
                     aria-label="seed の値"
                     inputMode="numeric"
@@ -6702,11 +6720,11 @@ export function App() {
                 <div className="mt-1 grid grid-cols-2 gap-2">
                   <div>
                     <label htmlFor="steps" className="block text-xs text-[var(--dim)] mb-1">Steps</label>
-                    <input {...FIELDS.createJob.steps} id="steps" inputMode="numeric" value={steps} onChange={(e) => setSteps(e.target.value)} onBlur={flushSettingsSave} className={`${inputCls} ${MONO}`} />
+                    <input {...FIELD_PROPS.createJob.steps} id="steps" inputMode="numeric" value={steps} onChange={(e) => setSteps(e.target.value)} onBlur={flushSettingsSave} className={`${inputCls} ${MONO}`} />
                   </div>
                   <div>
                     <label htmlFor="cfg" className="block text-xs text-[var(--dim)] mb-1">CFG</label>
-                    <input {...FIELDS.createJob.cfg} id="cfg" inputMode="decimal" value={cfg} onChange={(e) => setCfg(e.target.value)} onBlur={flushSettingsSave} className={`${inputCls} ${MONO}`} />
+                    <input {...FIELD_PROPS.createJob.cfg} id="cfg" inputMode="decimal" value={cfg} onChange={(e) => setCfg(e.target.value)} onBlur={flushSettingsSave} className={`${inputCls} ${MONO}`} />
                   </div>
                   <div>
                     <label htmlFor="sampler" className="block text-xs text-[var(--dim)] mb-1">サンプラー</label>
