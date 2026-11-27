@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { bytesToBase64, fileToBase64 } from "@hatch/space-sdk/client";
 import {
   api,
+  bytesToBase64,
   fetchSdModels,
+  fileToBase64,
   fetchSdSamplerLists,
   type ApiRequest,
   type ApiResponse,

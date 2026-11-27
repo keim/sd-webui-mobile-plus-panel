@@ -1,10 +1,7 @@
 // Standalone client bundler for the workbench UI.
 //
 // Bun.build over the HTML entry, production NODE_ENV, hashed asset
-// names, tailwind plugin. The one platform define kept is
-// __HATCH_SPACE_PLATFORM_VERSION__: the vendored SDK client reads it
-// (typeof-guarded) to enable its readable-failure messages; the value
-// 29 matches the SDK version vendored under vendor/space-sdk.
+// names, tailwind plugin.
 
 import { basename } from "node:path";
 import tailwindPlugin from "bun-plugin-tailwind";
@@ -20,7 +17,6 @@ const result = await Bun.build({
   minify: true,
   define: {
     "process.env.NODE_ENV": JSON.stringify("production"),
-    __HATCH_SPACE_PLATFORM_VERSION__: JSON.stringify(29),
   },
   naming: {
     asset: "assets/[name]-[hash].[ext]",

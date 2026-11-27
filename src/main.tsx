@@ -1,5 +1,8 @@
-import { spaceQueryClient } from "@hatch/space-sdk/client";
-import { QueryClientProvider } from "@tanstack/react-query";
+import {
+  MutationCache,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
@@ -10,16 +13,77 @@ if (!rootEl) {
   throw new Error("missing generated space root element");
 }
 
-// If you edit this file: keep `<QueryClientProvider client={spaceQueryClient}>`
-// wrapping the app (every space shares the SDK's QueryClient), and keep
-// BOTH the `hatch-space-root` class AND the `data-hatch-space-root`
-// attribute on the outer div. The SDK styles select on
-// `.hatch-space-root[data-hatch-space-root]` to apply mobile safe-area
-// insets (notches, gesture bars, etc.), correct viewport sizing, and the
-// hosting header/chrome offsets — dropping either breaks layout silently.
+// Failure notice for mutations that have no error handler of
+// their own (a behavior kept from the retired Space SDK's
+// shared client): a short-lived alert at the bottom of the
+// page, so a handler-less save never fails silently.
+let failureNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+function showFailureNotice(error: unknown) {
+  if (typeof document === "undefined" || document.body === null) return;
+  const message =
+    error instanceof Error && error.message
+      ? error.message
+      : "保存に失敗しました。もう一度お試しください。";
+  let notice = document.getElementById("workbench-failure-notice");
+  if (notice === null) {
+    notice = document.createElement("div");
+    notice.id = "workbench-failure-notice";
+    notice.setAttribute("role", "alert");
+    Object.assign(notice.style, {
+      position: "fixed",
+      left: "16px",
+      right: "16px",
+      bottom:
+        "calc(16px + env(safe-area-inset-bottom, 0px))",
+      width: "fit-content",
+      maxWidth: "480px",
+      marginInline: "auto",
+      pointerEvents: "none",
+      padding: "12px 16px",
+      borderRadius: "12px",
+      background: "rgba(20, 20, 20, 0.92)",
+      color: "#fff",
+      fontSize: "14px",
+      zIndex: "9999",
+    });
+    document.body.appendChild(notice);
+  }
+  notice.textContent = message;
+  if (failureNoticeTimer !== undefined) {
+    clearTimeout(failureNoticeTimer);
+  }
+  failureNoticeTimer = setTimeout(() => notice.remove(), 6_000);
+}
+
+// The app's QueryClient (2026-11-27: formerly the Space SDK's
+// shared spaceQueryClient). Defaults mirror the behavior the
+// workbench has run with: 30s staleTime, no refetch on focus,
+// and no query retries — the plain fetch client throws plain
+// Errors, which the old SDK retry predicate never retried
+// either (it only retried its own retry-safe action errors).
+const queryClient = new QueryClient({
+  mutationCache: new MutationCache({
+    onError: (error, _variables, _context, mutation) => {
+      if (
+        mutation.options.onError === undefined &&
+        mutation.options.onSettled === undefined
+      ) {
+        showFailureNotice(error);
+      }
+    },
+  }),
+  defaultOptions: {
+    queries: {
+      retry: false,
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+
 createRoot(rootEl).render(
   <StrictMode>
-    <QueryClientProvider client={spaceQueryClient}>
+    <QueryClientProvider client={queryClient}>
       <div className="hatch-space-root" data-hatch-space-root>
         <App />
       </div>

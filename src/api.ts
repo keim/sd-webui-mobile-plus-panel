@@ -107,3 +107,39 @@ export async function fetchSdSamplerLists(): Promise<{
   ]);
   return { samplers, schedulers };
 }
+
+// --- Base64 helpers (formerly the Space SDK's) -------------------
+// The obvious one-liner — btoa(String.fromCharCode(...bytes)) —
+// passes every byte as a separate argument and throws RangeError
+// on multi-megabyte payloads, the size class of every phone
+// photo. Encode in bounded 32 KB chunks instead (the native
+// Uint8Array.prototype.toBase64 is used when present).
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  const native = bytes as Uint8Array & {
+    toBase64?: () => string;
+  };
+  if (typeof native.toBase64 === "function") {
+    return native.toBase64();
+  }
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(
+      null,
+      chunk as unknown as number[],
+    );
+  }
+  return btoa(binary);
+}
+
+export async function fileToBase64(
+  file: File | Blob,
+): Promise<{ dataBase64: string; mimeType: string }> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return {
+    dataBase64: bytesToBase64(bytes),
+    mimeType: file.type || "application/octet-stream",
+  };
+}

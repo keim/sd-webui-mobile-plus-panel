@@ -1,11 +1,9 @@
 {
   "dependencies": {
-    "@hatch/space-sdk": "file:./vendor/space-sdk",
     "@tanstack/react-query": "5.100.10",
     "react": "19.2.5",
     "react-dom": "19.2.5",
-    "recharts": "2.15.3",
-    "zod": "4.4.3"
+    "recharts": "2.15.3"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",
