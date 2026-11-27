@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { bytesToBase64, fileToBase64 } from "@hatch/space-sdk/client";
-import { api, type ApiRequest, type ApiResponse } from "./api";
+import {
+  api,
+  fetchSdModels,
+  fetchSdSamplerLists,
+  type ApiRequest,
+  type ApiResponse,
+} from "./api";
 
 import { FIELDS } from "./fields";
 
@@ -2009,7 +2015,9 @@ export function App() {
   });
 
   // The template pane's model dropdown is built from the live
-  // checkpoint list (backend getModelList -> /sdapi/v1/sd-models),
+  // checkpoint list, fetched directly from /sdapi/v1/sd-models
+  // (2026-11-27: the page is served by the WebUI itself, so the
+  // read-only lists no longer go through the actions protocol),
   // so checkpoints installed later (the Anima family) are
   // selectable without a panel update. There is deliberately no
   // static fallback list (2026-11-26): when the fetch fails
@@ -2017,9 +2025,9 @@ export function App() {
   // when it is not in the list) remains selectable.
   const modelListQuery = useQuery({
     queryKey: ["modelList"],
-    queryFn: () => api.getModelList({}),
+    queryFn: () => fetchSdModels(),
   });
-  const fetchedModels = modelListQuery.data?.models ?? [];
+  const fetchedModels = modelListQuery.data ?? [];
   const modelOptions = fetchedModels.map((m) => m.name);
   // Latest fetched list for draft syncing: syncTemplateFields
   // normalizes through this ref, because the restore effect can
@@ -2029,14 +2037,14 @@ export function App() {
   const modelListRef = useRef<{ name: string; stem: string }[]>([]);
   modelListRef.current = fetchedModels;
 
-  // The sampler / scheduler lists likewise come from the live
-  // server (backend getSamplerList -> /sdapi/v1/samplers and
-  // /sdapi/v1/schedulers), so they cannot drift from what Forge
-  // actually offers. While the fetch is pending or has failed,
-  // the selects show just the current value.
+  // The sampler / scheduler lists likewise come straight from
+  // the live server (/sdapi/v1/samplers and /sdapi/v1/schedulers,
+  // fetched directly since 2026-11-27), so they cannot drift
+  // from what Forge actually offers. While the fetch is pending
+  // or has failed, the selects show just the current value.
   const samplerListQuery = useQuery({
     queryKey: ["samplerList"],
-    queryFn: () => api.getSamplerList({}),
+    queryFn: () => fetchSdSamplerLists(),
   });
   const samplerOptions = samplerListQuery.data?.samplers ?? [];
   const schedulerOptions = samplerListQuery.data?.schedulers ?? [];

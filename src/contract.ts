@@ -202,19 +202,6 @@ const saveImageResponse = z.object({
 });
 
 export const Actions = {
-  getModelList: {
-    request: z.object({}),
-    response: z.object({
-      models: z.array(z.object({ name: z.string(), stem: z.string() })),
-    }),
-  },
-  getSamplerList: {
-    request: z.object({}),
-    response: z.object({
-      samplers: z.array(z.string()),
-      schedulers: z.array(z.string()),
-    }),
-  },
   getWordDictionary: {
     request: z.object({}),
     response: z.object({ dictionary: z.string() }),

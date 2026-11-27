@@ -5,8 +5,6 @@
 // contract.ts limits change.
 
 export const FIELDS = {
-  "getModelList": {},
-  "getSamplerList": {},
   "getWordDictionary": {},
   "getTextSnippets": {},
   "saveTextSnippets": {

@@ -361,33 +361,32 @@ async function indexFromArgs(args) {
   return (await storedSaveIndex()) + 1;
 }
 
+// --- sdapi fixtures ----------------------------------------------------------
+// The panel fetches the read-only lists directly from the
+// WebUI's own API (2026-11-27), so the mock serves them in
+// sdapi's native shapes: plain names, one subfolder-prefixed
+// pair (canonical name vs bare stem), and a name with spaces.
+const SD_MODELS = [
+  { title: "anime-base-1.safetensors", model_name: "anime-base-1", filename: "anime-base-1.safetensors" },
+  { title: "big-checkpoint-29b.safetensors", model_name: "big-checkpoint-29b", filename: "big-checkpoint-29b.safetensors" },
+  { title: "Example RealSkin _v1 n.safetensors", model_name: "Example RealSkin _v1 n", filename: "Example RealSkin _v1 n.safetensors" },
+  { title: "illustrious_checkpoint-a.safetensors", model_name: "illustrious_checkpoint-a", filename: "illustrious/checkpoint-a.safetensors" },
+  { title: "illustrious_checkpoint-b.safetensors", model_name: "illustrious_checkpoint-b", filename: "illustrious/checkpoint-b.safetensors" },
+  { title: "photo-checkpoint-1.safetensors", model_name: "photo-checkpoint-1", filename: "photo-checkpoint-1.safetensors" },
+  { title: "turbo-bundle-x.safetensors", model_name: "turbo-bundle-x", filename: "turbo-bundle-x.safetensors" },
+];
+const SD_SAMPLERS = [
+  "DPM++ 2M", "DPM++ 2M SDE", "DPM++ SDE", "DPM++ 3M SDE",
+  "DPM2", "DPM++ 2S a", "Euler", "Euler a", "DDIM", "LMS",
+  "Heun", "UniPC", "Restart",
+];
+const SD_SCHEDULERS = [
+  "Karras", "Exponential", "Normal", "Simple", "Beta",
+  "DDIM Uniform", "SGM Uniform", "Align Your Steps",
+];
+
 // --- actions ---------------------------------------------------------------
 const ACTIONS = {
-  // Synthetic checkpoint list with the same shapes as a real
-  // /sdapi/v1/sd-models reply: plain names, one subfolder-prefixed
-  // pair (canonical name vs bare stem), and a name with spaces.
-  getModelList: async () => ({
-    models: [
-      { name: "anime-base-1", stem: "anime-base-1" },
-      { name: "big-checkpoint-29b", stem: "big-checkpoint-29b" },
-      { name: "Example RealSkin _v1 n", stem: "Example RealSkin _v1 n" },
-      { name: "illustrious_checkpoint-a", stem: "checkpoint-a" },
-      { name: "illustrious_checkpoint-b", stem: "checkpoint-b" },
-      { name: "photo-checkpoint-1", stem: "photo-checkpoint-1" },
-      { name: "turbo-bundle-x", stem: "turbo-bundle-x" },
-    ],
-  }),
-  getSamplerList: async () => ({
-    samplers: [
-      "DPM++ 2M", "DPM++ 2M SDE", "DPM++ SDE", "DPM++ 3M SDE",
-      "DPM2", "DPM++ 2S a", "Euler", "Euler a", "DDIM", "LMS",
-      "Heun", "UniPC", "Restart",
-    ],
-    schedulers: [
-      "Karras", "Exponential", "Normal", "Simple", "Beta",
-      "DDIM Uniform", "SGM Uniform", "Align Your Steps",
-    ],
-  }),
   getWordDictionary: async () => ({
     dictionary: JSON.stringify(state.dictionary),
   }),
@@ -677,6 +676,19 @@ const server = Bun.serve({
 
     if (path === "/") {
       return Response.redirect("/mobileplus/", 302);
+    }
+    if (path === "/sdapi/v1/sd-models") {
+      return Response.json(SD_MODELS);
+    }
+    if (path === "/sdapi/v1/samplers") {
+      return Response.json(
+        SD_SAMPLERS.map((name) => ({ name, aliases: [], options: {} })),
+      );
+    }
+    if (path === "/sdapi/v1/schedulers") {
+      return Response.json(
+        SD_SCHEDULERS.map((name) => ({ name, label: name, aliases: [] })),
+      );
     }
     if (path === "/mobileplus/actions" && req.method === "POST") {
       let body;
