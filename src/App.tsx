@@ -517,6 +517,190 @@ function calculateAspectSize(
 // inside it. The caller passes ratioW/ratioH as NaN when there is
 // nothing valid to preview (no selection, unparseable dimensions),
 // in which case only the background and guides are drawn.
+// Pinch zoom + drag pan for a full-area image (the Preview and
+// 画像加工 panes). The transform applies to the <img> itself
+// (transform-origin: center); the focal-point math keeps the
+// content point under the fingers / cursor stationary while
+// scaling. Scale clamps to 1..5; at scale 1 the translation
+// resets to 0. A double click resets the view, and the wheel
+// zooms around the cursor. `resetKey` changing (another image,
+// or the pane being left) resets the view.
+function useImageZoom(resetKey: string | null) {
+  const [view, setView] = useState({ scale: 1, tx: 0, ty: 0 });
+  const areaRef = useRef<HTMLDivElement | null>(null);
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const gestureRef = useRef<{
+    startScale: number;
+    startTx: number;
+    startTy: number;
+    startDist: number;
+    startMid: { x: number; y: number };
+    focal: { x: number; y: number };
+    lastX: number;
+    lastY: number;
+  } | null>(null);
+
+  useEffect(() => {
+    setView({ scale: 1, tx: 0, ty: 0 });
+    pointersRef.current.clear();
+    gestureRef.current = null;
+  }, [resetKey]);
+
+  const clampView = (v: { scale: number; tx: number; ty: number }) => {
+    const scale = Math.min(5, Math.max(1, v.scale));
+    if (scale === 1) return { scale: 1, tx: 0, ty: 0 };
+    const w = areaRef.current?.clientWidth ?? 0;
+    const h = areaRef.current?.clientHeight ?? 0;
+    const maxTx = (w * scale) / 2;
+    const maxTy = (h * scale) / 2;
+    return {
+      scale,
+      tx: Math.min(maxTx, Math.max(-maxTx, v.tx)),
+      ty: Math.min(maxTy, Math.max(-maxTy, v.ty)),
+    };
+  };
+
+  const centerOffset = (x: number, y: number) => {
+    const rect = areaRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return {
+      x: x - (rect.left + rect.width / 2),
+      y: y - (rect.top + rect.height / 2),
+    };
+  };
+
+  const beginGesture = () => {
+    const pts = [...pointersRef.current.values()];
+    if (pts.length === 0) {
+      gestureRef.current = null;
+      return;
+    }
+    const mid = {
+      x: pts.reduce((a, p) => a + p.x, 0) / pts.length,
+      y: pts.reduce((a, p) => a + p.y, 0) / pts.length,
+    };
+    gestureRef.current = {
+      startScale: view.scale,
+      startTx: view.tx,
+      startTy: view.ty,
+      startDist:
+        pts.length === 2 && pts[0] && pts[1]
+          ? Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
+          : 0,
+      startMid: mid,
+      focal: centerOffset(mid.x, mid.y),
+      lastX: mid.x,
+      lastY: mid.y,
+    };
+  };
+
+  const handlers = {
+    onPointerDown: (e: ReactPointerEvent) => {
+      e.preventDefault();
+      try {
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      } catch {
+        // A synthetic or already-released pointer: the gesture
+        // still works without capture.
+      }
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      beginGesture();
+    },
+    onPointerMove: (e: ReactPointerEvent) => {
+      if (!pointersRef.current.has(e.pointerId)) return;
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const g = gestureRef.current;
+      if (!g) return;
+      const pts = [...pointersRef.current.values()];
+      const [p0, p1] = pts;
+      if (pts.length === 2 && p0 && p1 && g.startDist > 0) {
+        const dist = Math.hypot(p0.x - p1.x, p0.y - p1.y);
+        const mid = {
+          x: (p0.x + p1.x) / 2,
+          y: (p0.y + p1.y) / 2,
+        };
+        const scale = Math.min(5, Math.max(1, g.startScale * (dist / g.startDist)));
+        // The content point that sat under the start focal, and
+        // where that focal has travelled to (two-finger pan).
+        const px = (g.focal.x - g.startTx) / g.startScale;
+        const py = (g.focal.y - g.startTy) / g.startScale;
+        const moved = centerOffset(mid.x, mid.y);
+        const dx = moved.x - centerOffset(g.startMid.x, g.startMid.y).x;
+        const dy = moved.y - centerOffset(g.startMid.x, g.startMid.y).y;
+        setView(
+          clampView({
+            scale,
+            tx: g.focal.x + dx - px * scale,
+            ty: g.focal.y + dy - py * scale,
+          }),
+        );
+      } else if (pts.length === 1 && p0) {
+        const dx = p0.x - g.lastX;
+        const dy = p0.y - g.lastY;
+        g.lastX = p0.x;
+        g.lastY = p0.y;
+        if (view.scale > 1) {
+          setView((v) => clampView({ scale: v.scale, tx: v.tx + dx, ty: v.ty + dy }));
+        }
+      }
+    },
+    onPointerUp: (e: ReactPointerEvent) => {
+      pointersRef.current.delete(e.pointerId);
+      if (pointersRef.current.size === 1) {
+        // Re-anchor so the remaining finger does not jump.
+        const only = [...pointersRef.current.values()][0];
+        if (only) gestureRef.current = {
+          startScale: view.scale,
+          startTx: view.tx,
+          startTy: view.ty,
+          startDist: 0,
+          startMid: only,
+          focal: centerOffset(only.x, only.y),
+          lastX: only.x,
+          lastY: only.y,
+        };
+      } else if (pointersRef.current.size === 0) {
+        gestureRef.current = null;
+      }
+    },
+    onPointerCancel: (e: ReactPointerEvent) => {
+      pointersRef.current.delete(e.pointerId);
+      if (pointersRef.current.size === 0) gestureRef.current = null;
+    },
+    onDoubleClick: () => setView({ scale: 1, tx: 0, ty: 0 }),
+  };
+
+  // Wheel zoom (native listener: React's root wheel handling is
+  // passive, so preventDefault needs the direct registration).
+  useEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const f = {
+        x: e.clientX - (rect.left + rect.width / 2),
+        y: e.clientY - (rect.top + rect.height / 2),
+      };
+      setView((v) => {
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const scale = Math.min(5, Math.max(1, v.scale * factor));
+        const px = (f.x - v.tx) / v.scale;
+        const py = (f.y - v.ty) / v.scale;
+        return clampView({ scale, tx: f.x - px * scale, ty: f.y - py * scale });
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  return {
+    areaRef,
+    handlers,
+    transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
+  };
+}
+
 function drawAspectPreview(
   canvas: HTMLCanvasElement,
   ratioW: number,
@@ -2031,6 +2215,14 @@ export function App() {
   const [toneOpen, setToneOpen] = useState(false);
   const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0 });
   const [editError, setEditError] = useState<string | null>(null);
+  // Pinch zoom / drag pan for the Preview and 画像加工 images.
+  // The key includes the pane so leaving a pane resets its view.
+  const previewZoom = useImageZoom(
+    tab === "preview" ? (editorSource.displayUrl ?? "none") : null,
+  );
+  const processZoom = useImageZoom(
+    tab === "process" ? (editorSource.displayUrl ?? "none") : null,
+  );
   useEffect(() => {
     if (saveNotice == null) return;
     const t = setTimeout(() => setSaveNotice(null), 4000);
@@ -6271,13 +6463,20 @@ export function App() {
             <div className="relative min-h-0 min-w-0">
               {editorSource.kind !== "none" && editorSource.displayUrl ? (
                 <>
-                  <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+                  <div
+                    ref={processZoom.areaRef}
+                    {...processZoom.handlers}
+                    className="absolute inset-0 flex items-center justify-center overflow-hidden bg-[var(--surface-alt)]"
+                    style={{ touchAction: "none" }}
+                  >
                     <img
                       src={editorSource.displayUrl}
                       alt="加工対象の画像"
+                      draggable={false}
                       className="h-full w-full object-contain"
                       style={{
                         filter: `brightness(${1 + tone.brightness / 100}) contrast(${1 + tone.contrast / 100}) saturate(${1 + tone.saturation / 100})`,
+                        transform: processZoom.transform,
                       }}
                     />
                   </div>
@@ -6537,11 +6736,18 @@ export function App() {
             <div className="relative min-h-0 min-w-0">
               {editorSource.kind !== "none" && editorSource.displayUrl ? (
                 <>
-                  <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+                  <div
+                    ref={previewZoom.areaRef}
+                    {...previewZoom.handlers}
+                    className="absolute inset-0 flex items-center justify-center overflow-hidden bg-[var(--surface-alt)]"
+                    style={{ touchAction: "none" }}
+                  >
                     <img
                       src={editorSource.displayUrl}
                       alt="現在の画像"
+                      draggable={false}
                       className="h-full w-full object-contain"
+                      style={{ transform: previewZoom.transform }}
                     />
                   </div>
                   <button
