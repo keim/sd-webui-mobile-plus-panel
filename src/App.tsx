@@ -52,7 +52,7 @@ const RESIZE_MODES = [
   { value: 3, label: "Latent" },
 ] as const;
 
-type PaneKey = "editor" | "preview" | "inpaint" | "parameters" | "history";
+type PaneKey = "editor" | "preview" | "inpaint" | "parameters" | "history" | "process";
 
 // --- Polling self-recovery (2026-11-21) ------------------------------
 // Every polling request (the jobs list fetch and each
@@ -1838,6 +1838,44 @@ export function App() {
     onError: () => setUploadError("元画像に採用できませんでした。通信状態を確認してください。"),
   });
 
+  // Preview's adopt button （元画像に設定してInpaintへ移動）: the
+  // same adopt as the image area's button, then on to the
+  // Inpaint pane — the pane works on the source slot, so the
+  // image must land there first.
+  const adoptForInpaint = useMutation({
+    mutationFn: () => api.adoptEditorSource({}),
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ["sourceImage"] });
+      if (!res.ok) {
+        setUploadError(res.error ?? "元画像に設定できませんでした。");
+      } else {
+        switchToI2iSide();
+        switchTab("inpaint");
+      }
+    },
+    onError: () => setUploadError("元画像に設定できませんでした。通信状態を確認してください。"),
+  });
+
+  // 画像加工の保存： bake the 色調 adjustments into a NEW
+  // generated image (a completed job) on the server. The new
+  // job becomes the Editor's image, like a finished generation.
+  const createEditedJob = useMutation({
+    mutationFn: (args: ApiRequest<"createEditedJob">) => api.createEditedJob(args),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        setEditError(res.error ?? "加工結果を保存できませんでした。");
+        return;
+      }
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
+      setTone({ brightness: 0, saturation: 0, contrast: 0 });
+      setToneOpen(false);
+      setEditError(null);
+      switchTab("editor");
+    },
+    onError: () => setEditError("加工結果を保存できませんでした。通信状態を確認してください。"),
+  });
+
   // 「Editorへ転送」 (history detail): make the job's generated image
   // the Editor's current image (server-side slot) and switch to
   // the Editor pane. As a user image-list selection, a successful
@@ -1987,6 +2025,12 @@ export function App() {
   // a failure keeps its message until the next save attempt.
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Image processing pane （画像加工）: the 色調 adjustments, in
+  // percent (-100..100, 0 = untouched). Reset on every entry
+  // from the Preview pane.
+  const [toneOpen, setToneOpen] = useState(false);
+  const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0 });
+  const [editError, setEditError] = useState<string | null>(null);
   useEffect(() => {
     if (saveNotice == null) return;
     const t = setTimeout(() => setSaveNotice(null), 4000);
@@ -4877,6 +4921,39 @@ export function App() {
     </button>
   );
 
+  // The Preview pane's leading button: the image area adopt
+  // button's icon and dress, but its click adopts AND moves to
+  // the Inpaint pane (see adoptForInpaint).
+  const previewAdoptButton = (
+    <button
+      type="button"
+      aria-label="元画像に設定してInpaintへ移動"
+      disabled={adoptForInpaint.isPending}
+      onClick={(e) => {
+        e.stopPropagation();
+        adoptForInpaint.mutate();
+      }}
+      className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
+      style={{ width: "2.25rem", height: "2.25rem", minHeight: "2.25rem" }}
+    >
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+        <circle cx="9" cy="9" r="2" />
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+      </svg>
+    </button>
+  );
+
   // The image area's bottom-right button trio (download / save /
   // delete), shared by the Editor image area and the Preview
   // pane. The Editor passes its adopt button （元画像に採用） as
@@ -6182,6 +6259,170 @@ export function App() {
             when it does not — regardless of the Editor mode
             toggle (see buildJobArgs). The image area shows the
             the img2img source image. */}
+        {tab === "process" && (
+          <section
+            aria-label="画像加工"
+            className="relative grid h-full min-h-0 min-w-0"
+            style={{
+              gridTemplateRows: "1fr auto",
+              gridTemplateColumns: "minmax(0, 1fr)",
+            }}
+          >
+            <div className="relative min-h-0 min-w-0">
+              {editorSource.kind !== "none" && editorSource.displayUrl ? (
+                <>
+                  <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+                    <img
+                      src={editorSource.displayUrl}
+                      alt="加工対象の画像"
+                      className="h-full w-full object-contain"
+                      style={{
+                        filter: `brightness(${1 + tone.brightness / 100}) contrast(${1 + tone.contrast / 100}) saturate(${1 + tone.saturation / 100})`,
+                      }}
+                    />
+                  </div>
+                  {imageNamePlate("left-0")}
+                  <button
+                    type="button"
+                    aria-label="プレビューに戻る"
+                    onClick={() => switchTab("preview")}
+                    className="absolute right-2 top-2 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
+                    style={{ width: "3.375rem", height: "3.375rem", minHeight: "3.375rem" }}
+                  >
+                    <svg
+                      width="24"
+                      height="24"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="m14 6-6 6 6 6" />
+                    </svg>
+                  </button>
+                  {editError && (
+                    <p
+                      role="alert"
+                      className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
+                    >
+                      {editError}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
+                  <span className="px-4 text-center text-sm text-[var(--dim)]">
+                    画像はまだありません。Editor で画像を設定してください。
+                  </span>
+                </div>
+              )}
+            </div>
+            <div
+              className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)]"
+              style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+            >
+              {toneOpen && (
+                <div className="grid gap-3 px-4 py-3" aria-label="色調調整">
+                  {(
+                    [
+                      ["brightness", "明度"],
+                      ["saturation", "彩度"],
+                      ["contrast", "コントラスト"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-3 text-sm">
+                      <span className="w-14 shrink-0">{label}</span>
+                      <input
+                        type="range"
+                        min={-100}
+                        max={100}
+                        step={1}
+                        value={tone[key]}
+                        aria-label={`${label}の調整`}
+                        onChange={(e) =>
+                          setTone((t) => ({ ...t, [key]: Number(e.target.value) }))
+                        }
+                        className="min-w-0 flex-1"
+                      />
+                      <span className="w-12 shrink-0 text-right text-xs" style={{ fontFamily: "var(--mono)" }}>
+                        {tone[key] > 0 ? `+${tone[key]}` : tone[key]}%
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="grid grid-cols-4 gap-2 p-2" role="group" aria-label="加工操作">
+                <button
+                  type="button"
+                  aria-label="色調"
+                  aria-pressed={toneOpen}
+                  onClick={() => setToneOpen((v) => !v)}
+                  className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--text)] rounded-[var(--radius)]"
+                  style={{
+                    minHeight: "2.75rem",
+                    ...(toneOpen
+                      ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                      : {}),
+                  }}
+                >
+                  色調
+                </button>
+                {Array.from({ length: 10 }, (_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    disabled
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--text)] rounded-[var(--radius)] opacity-40"
+                    style={{ minHeight: "2.75rem" }}
+                  />
+                ))}
+                <button
+                  type="button"
+                  aria-label="加工を保存"
+                  disabled={
+                    createEditedJob.isPending ||
+                    !(
+                      (editorSource.kind === "job" && editorSource.jobId != null) ||
+                      (editorSource.kind === "upload" && editorSource.uploadId != null)
+                    )
+                  }
+                  onClick={() => {
+                    setEditError(null);
+                    if (editorSource.kind === "job" && editorSource.jobId != null) {
+                      createEditedJob.mutate({
+                        sourceKind: "job",
+                        jobId: editorSource.jobId,
+                        brightness: tone.brightness,
+                        saturation: tone.saturation,
+                        contrast: tone.contrast,
+                      });
+                    } else if (
+                      editorSource.kind === "upload" &&
+                      editorSource.uploadId != null
+                    ) {
+                      createEditedJob.mutate({
+                        sourceKind: "upload",
+                        uploadId: editorSource.uploadId,
+                        brightness: tone.brightness,
+                        saturation: tone.saturation,
+                        contrast: tone.contrast,
+                      });
+                    }
+                  }}
+                  className="flex items-center justify-center border border-[var(--border)] bg-[var(--surface)] text-sm font-semibold text-[var(--text)] rounded-[var(--radius)] disabled:opacity-50"
+                  style={{ minHeight: "2.75rem" }}
+                >
+                  保存
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
         {tab === "inpaint" && (
           <section
             aria-label="Inpaint"
@@ -6347,8 +6588,13 @@ export function App() {
                   </button>
                   <button
                     type="button"
-                    aria-label="Inpaintへ移動"
-                    onClick={() => switchTab("inpaint")}
+                    aria-label="画像加工へ移動"
+                    onClick={() => {
+                      setTone({ brightness: 0, saturation: 0, contrast: 0 });
+                      setToneOpen(false);
+                      setEditError(null);
+                      switchTab("process");
+                    }}
                     className="absolute bottom-2 left-2 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
                     style={{ width: "3.375rem", height: "3.375rem", minHeight: "3.375rem" }}
                   >
@@ -6363,11 +6609,18 @@ export function App() {
                       strokeLinejoin="round"
                       aria-hidden="true"
                     >
-                      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                      <path d="m15 5 4 4" />
+                      <line x1="21" x2="14" y1="4" y2="4" />
+                      <line x1="10" x2="3" y1="4" y2="4" />
+                      <line x1="21" x2="12" y1="12" y2="12" />
+                      <line x1="8" x2="3" y1="12" y2="12" />
+                      <line x1="21" x2="16" y1="20" y2="20" />
+                      <line x1="12" x2="3" y1="20" y2="20" />
+                      <line x1="14" y1="2" y2="6" />
+                      <line x1="8" y1="10" y2="14" />
+                      <line x1="16" y1="18" y2="22" />
                     </svg>
                   </button>
-                  {renderEditorImageButtons()}
+                  {renderEditorImageButtons(previewAdoptButton)}
                   {(saveNotice || saveError) && (
                     <p
                       role={saveError ? "alert" : "status"}
@@ -7468,7 +7721,7 @@ export function App() {
           the sizePopupOpen state). The row carries the Android
           safe-area bottom padding itself now that it is the
           bottom-most element. --- */}
-      {tab !== "history" && tab !== "preview" && (
+      {tab !== "history" && tab !== "preview" && tab !== "process" && (
         <div
           className="relative border-t border-[var(--border)] bg-[var(--surface)]"
           style={{ paddingBottom: "env(safe-area-inset-bottom)" }}

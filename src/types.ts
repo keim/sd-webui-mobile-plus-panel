@@ -294,6 +294,20 @@ export interface Actions {
     request: CreateJobRequest;
     response: CreateJobResponse;
   };
+  // 画像加工の保存： bake the processing pane's 色調 adjustments
+  // into the source image and record the result as a new
+  // completed job (which becomes the Editor's image).
+  createEditedJob: {
+    request: {
+      sourceKind: "job" | "upload";
+      jobId?: number | null;
+      uploadId?: number | null;
+      brightness: number;
+      saturation: number;
+      contrast: number;
+    };
+    response: CreateJobResponse;
+  };
   pollGenerationJob: {
     request: { jobId: number };
     response: PollGenerationJobResponse;

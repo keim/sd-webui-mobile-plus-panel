@@ -574,6 +574,61 @@ const ACTIONS = {
     }
     return { ok: true, jobId: id, error: null };
   },
+  createEditedJob: async (args) => {
+    await tick();
+    const clampPct = (v) =>
+      Math.max(-100, Math.min(100, Math.round(Number(v) || 0)));
+    const brightness = clampPct(args.brightness);
+    const saturation = clampPct(args.saturation);
+    const contrast = clampPct(args.contrast);
+    const srcJob =
+      args.sourceKind === "job" ? state.jobs.get(args.jobId) : undefined;
+    const srcUpload =
+      args.sourceKind === "upload"
+        ? state.uploads.get(args.uploadId)
+        : undefined;
+    if (!srcJob && !srcUpload) {
+      return { ok: false, jobId: null, error: "加工元の画像が見つかりません。" };
+    }
+    const id = state.nextJobId++;
+    const sample = SAMPLES[id % SAMPLES.length];
+    const job = {
+      id, kind: "generate", status: "completed", phase: null,
+      phaseUpdatedAt: nowIso(),
+      model: srcJob?.model ?? null,
+      prompt: srcJob?.prompt ?? srcUpload?.prompt ?? null,
+      negativePrompt: srcJob?.negativePrompt ?? null,
+      width: srcJob?.width ?? 768, height: srcJob?.height ?? 1024,
+      seedMode: srcJob?.seedMode ?? "random",
+      seedInput: srcJob?.seedInput ?? null,
+      steps: srcJob?.steps ?? null, cfg: srcJob?.cfg ?? null,
+      sampler: srcJob?.sampler ?? null,
+      scheduler: srcJob?.scheduler ?? null,
+      mode: srcJob?.mode ?? "txt2img",
+      sourceJobId: null, initSource: null,
+      denoisingStrength: null, resizeMode: null,
+      payload: null, maskSent: false,
+      resultSeed: srcJob?.resultSeed ?? null,
+      imageKey: `jobs/${id}.png`, displayKey: `jobs/${id}.display.jpg`,
+      usedParams: JSON.stringify({
+        edited: true,
+        sourceKind: args.sourceKind,
+        sourceJobId: srcJob?.id ?? null,
+        sourceUploadId: srcUpload?.id ?? null,
+        brightness, saturation, contrast,
+        mock: true,
+      }),
+      loraHashes: null, error: null,
+      createdAt: nowIso(), updatedAt: nowIso(),
+      startedAt: Date.now(), sample: null,
+    };
+    state.jobs.set(id, job);
+    await copyFixtureTo(`${sample}.png`, job.imageKey);
+    await copyFixtureTo(`${sample}.display.jpg`, job.displayKey);
+    // Mirror production: the edited image becomes the Editor's image.
+    state.editor = { kind: "job", jobId: id };
+    return { ok: true, jobId: id, error: null };
+  },
   pollGenerationJob: async (args) => {
     await tick();
     const job = state.jobs.get(args.jobId);
