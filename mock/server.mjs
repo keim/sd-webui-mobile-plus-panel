@@ -590,6 +590,7 @@ const ACTIONS = {
     const brightness = clampPct(args.brightness);
     const saturation = clampPct(args.saturation);
     const contrast = clampPct(args.contrast);
+    const temperature = clampPct(args.temperature);
     const drawing =
       typeof args.drawing === "string" && args.drawing.length > 0;
     state.lastEditedDrawing = drawing;
@@ -627,7 +628,7 @@ const ACTIONS = {
         sourceKind: args.sourceKind,
         sourceJobId: srcJob?.id ?? null,
         sourceUploadId: srcUpload?.id ?? null,
-        brightness, saturation, contrast,
+        brightness, saturation, contrast, temperature,
         drawing,
         mock: true,
       }),

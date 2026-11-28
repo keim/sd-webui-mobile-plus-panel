@@ -650,6 +650,7 @@ const ACTIONS: Record<string, (args: Rec) => Promise<unknown>> = {
     const brightness = clampPct(args.brightness);
     const saturation = clampPct(args.saturation);
     const contrast = clampPct(args.contrast);
+    const temperature = clampPct(args.temperature);
     const drawing =
       typeof args.drawing === "string" && args.drawing.length > 0;
     const srcJob =
@@ -686,7 +687,7 @@ const ACTIONS: Record<string, (args: Rec) => Promise<unknown>> = {
         sourceKind: args.sourceKind,
         sourceJobId: srcJob?.id ?? null,
         sourceUploadId: srcUpload?.id ?? null,
-        brightness, saturation, contrast,
+        brightness, saturation, contrast, temperature,
         drawing,
         mock: true,
       }),

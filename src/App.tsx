@@ -489,6 +489,15 @@ const PIXEL_SIZES: number[] = [1024, 1280, 1440];
 const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
 const MASK_BLUR_SIZES: number[] = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16];
 
+// Color-temperature channel gains for a -100..100 slider value
+// (positive = warm). The single definition shared by the CSS
+// preview (an SVG feColorMatrix), the eyedropper and — mirrored
+// in Python — the save path in workbench_backend.py.
+function temperatureGains(t: number): { r: number; g: number; b: number } {
+  const k = Math.max(-100, Math.min(100, t)) / 100;
+  return { r: 1 + 0.25 * k, g: 1 + 0.05 * k, b: 1 - 0.25 * k };
+}
+
 // Index of the stepped-slider stop nearest to a saved value
 // (saved settings can hold values between stops; the slider
 // snaps to a stop on the first change).
@@ -723,6 +732,7 @@ function useImageZoom(
   return {
     areaRef,
     handlers,
+    scale: view.scale,
     transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
   };
 }
@@ -2078,7 +2088,7 @@ export function App() {
       }
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
-      setTone({ brightness: 0, saturation: 0, contrast: 0 });
+      setTone({ brightness: 0, saturation: 0, contrast: 0, temperature: 0 });
       setToneOpen(false);
       setDrawOpen(false);
       setLayerOpen(false);
@@ -2252,7 +2262,7 @@ export function App() {
     setLayerOpen(tool === "layer" ? !layerOpen : false);
     setColorPickerOpen(false);
   }
-  const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0 });
+  const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0, temperature: 0 });
   const [editError, setEditError] = useState<string | null>(null);
   // 画像加工の描画: freehand drawing over the image, operated like
   // the Inpaint mask (offscreen canvas at the image's natural
@@ -3034,9 +3044,8 @@ export function App() {
 
   // Pointer position on the display canvas, converted to mask
   // (natural-pixel) coordinates; `scale` is natural width / display
-  // width — the brush diameter is specified in display pixels and
-  // converted with this factor when drawn onto the natural-size
-  // mask.
+  // width. The brush diameter is specified in image (natural)
+  // pixels and used as-is on the natural-size mask.
   function maskPointFromEvent(
     e: ReactPointerEvent<HTMLCanvasElement>,
   ): { x: number; y: number; scale: number } | null {
@@ -3054,13 +3063,12 @@ export function App() {
   function drawMaskStroke(
     from: { x: number; y: number },
     to: { x: number; y: number },
-    scale: number,
   ) {
     const canvas = maskCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.lineWidth = (Number(brushSize) || 100) * scale;
+    ctx.lineWidth = Number(brushSize) || 100;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     if (penTool === "eraser") {
@@ -3108,7 +3116,7 @@ export function App() {
     maskLastPointRef.current = point;
     // A line from the point to itself, with a round cap, paints
     // the brush circle centred on the pointer.
-    drawMaskStroke(point, point, point.scale);
+    drawMaskStroke(point, point);
   }
 
   function onMaskPointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
@@ -3118,7 +3126,7 @@ export function App() {
     const last = maskLastPointRef.current ?? point;
     // Interpolate from the previous position so a fast drag leaves
     // no gaps.
-    drawMaskStroke(last, point, point.scale);
+    drawMaskStroke(last, point);
     maskLastPointRef.current = point;
   }
 
@@ -3321,13 +3329,12 @@ export function App() {
   function drawDrawStroke(
     from: { x: number; y: number },
     to: { x: number; y: number },
-    scale: number,
   ) {
     const canvas = drawCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.lineWidth = (Number(drawBrush) || 24) * scale;
+    ctx.lineWidth = Number(drawBrush) || 24;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.globalAlpha = Math.max(0, Math.min(100, drawAlpha)) / 100;
@@ -3359,7 +3366,7 @@ export function App() {
     points: { x: number; y: number }[],
     style: { color: string; alpha: number; brush: number; scale: number },
   ) {
-    ctx.lineWidth = (Number(style.brush) || 24) * style.scale;
+    ctx.lineWidth = Number(style.brush) || 24;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.globalAlpha = Math.max(0, Math.min(100, style.alpha)) / 100;
@@ -3477,10 +3484,16 @@ export function App() {
       Math.max(0, Math.round((point.y / disp.height) * canvas.height)),
     );
     const d = ctx.getImageData(sx, sy, 1, 1).data;
+    // Canvas filters cannot reference the SVG temperature
+    // filter, so its channel gains are applied to the sampled
+    // pixel directly.
+    const gains = temperatureGains(tone.temperature);
+    const ch = (v: number | undefined, g: number) =>
+      Math.max(0, Math.min(255, Math.round((v ?? 0) * g)));
     const hex =
       "#" +
-      [d[0], d[1], d[2]]
-        .map((v) => (v ?? 0).toString(16).padStart(2, "0"))
+      [ch(d[0], gains.r), ch(d[1], gains.g), ch(d[2], gains.b)]
+        .map((v) => v.toString(16).padStart(2, "0"))
         .join("");
     setDrawColor(hex);
     setDrawTool("pen");
@@ -3514,7 +3527,7 @@ export function App() {
         snap.height = src.height;
         snap.getContext("2d")?.drawImage(src, 0, 0);
       }
-      drawDrawStroke(point, point, point.scale);
+      drawDrawStroke(point, point);
     } else {
       // Pen: accumulate the path on the preview canvas; the
       // layer itself is touched only on pointer-up. The tool
@@ -3558,7 +3571,7 @@ export function App() {
       const point = drawPointFromEvent(e);
       if (!point) return;
       const last = drawLastPointRef.current ?? point;
-      drawDrawStroke(last, point, point.scale);
+      drawDrawStroke(last, point);
       drawLastPointRef.current = point;
       return;
     }
@@ -6200,8 +6213,10 @@ export function App() {
   // The canvas
   // bitmap is the mask's natural size; it renders at 50% opacity
   // so painted areas read as 50% white over the image. While the
-  // brush-size popup is open, a sample circle of the current brush
-  // diameter (in display pixels) is shown at the preview's centre.
+  // brush size is being changed, a sample circle is shown at the
+  // preview's centre; the brush diameter is specified in image
+  // pixels, so the circle's on-screen size follows the displayed
+  // image size and the pinch zoom.
   const brushDiameter = Number(brushSize) || 100;
   let maskRect: { left: number; top: number; w: number; h: number } | null = null;
   if (inpaintBox && maskNatural && inpaintBox.w > 0 && inpaintBox.h > 0) {
@@ -6219,6 +6234,10 @@ export function App() {
       h,
     };
   }
+  const maskSampleDiameter =
+    maskRect && maskNatural
+      ? brushDiameter * (maskRect.w / maskNatural.w) * inpaintZoom.scale
+      : brushDiameter;
 
   // The 画像加工 drawing canvas's rectangle: the Editor image's
   // drawn (object-contain) area inside the process image area,
@@ -6239,6 +6258,21 @@ export function App() {
       h,
     };
   }
+  // The draw brush diameter is specified in image pixels; the
+  // sample circle's on-screen size follows the displayed image
+  // size and the pinch zoom.
+  const drawSampleDiameter =
+    drawRect && drawNatural
+      ? drawBrush * (drawRect.w / drawNatural.w) * processZoom.scale
+      : drawBrush;
+
+  // Color-temperature preview: an SVG feColorMatrix with the
+  // shared channel gains, referenced from the image's CSS filter
+  // while the temperature is non-zero.
+  const toneTempGains = temperatureGains(tone.temperature);
+  const toneTempMatrix =
+    `${toneTempGains.r} 0 0 0 0 0 ${toneTempGains.g} 0 0 0 ` +
+    `0 0 ${toneTempGains.b} 0 0 0 0 0 1 0`;
 
   const inpaintImageDisplay = (
     <div
@@ -6295,8 +6329,8 @@ export function App() {
               style={{
                 left: "50%",
                 top: "50%",
-                width: brushDiameter,
-                height: brushDiameter,
+                width: maskSampleDiameter,
+                height: maskSampleDiameter,
                 transform: "translate(-50%, -50%)",
                 backgroundColor: "rgba(255, 255, 255, 0.5)",
                 border: "2px solid var(--accent2)",
@@ -6360,13 +6394,13 @@ export function App() {
   );
 
   const popupPanelCls =
-    "absolute inset-x-0 bottom-full z-40 border border-b-0 border-[var(--border)] bg-[var(--surface)] p-3";
+    "border border-b-0 border-[var(--border)] bg-[var(--surface)] p-3";
   // Vertically compressed variant for the style / denoise slider
   // popups: same panel, tighter padding. These two popups carry no
   // explanation text, no prompt preview and no close button —
   // dismissal is the general outside-tap rule only.
   const popupPanelCompactCls =
-    "absolute inset-x-0 bottom-full z-40 border border-b-0 border-[var(--border)] bg-[var(--surface)] px-3 py-2";
+    "border border-b-0 border-[var(--border)] bg-[var(--surface)] px-3 py-2";
 
   // Editor parameter panel popups (open upward from the panel).
   const editorPopupContent = editorPopup === "model" ? (
@@ -7219,7 +7253,7 @@ export function App() {
                       draggable={false}
                       className="h-full w-full object-contain"
                       style={{
-                        filter: `brightness(${1 + tone.brightness / 100}) contrast(${1 + tone.contrast / 100}) saturate(${1 + tone.saturation / 100})`,
+                        filter: `brightness(${1 + tone.brightness / 100}) contrast(${1 + tone.contrast / 100}) saturate(${1 + tone.saturation / 100})${tone.temperature !== 0 ? " url(#tone-temp-filter)" : ""}`,
                         transform: processZoom.transform,
                       }}
                     />
@@ -7272,8 +7306,8 @@ export function App() {
                         style={{
                           left: "50%",
                           top: "50%",
-                          width: drawBrush,
-                          height: drawBrush,
+                          width: drawSampleDiameter,
+                          height: drawSampleDiameter,
                           transform: "translate(-50%, -50%)",
                           backgroundColor: "rgba(255, 255, 255, 0.5)",
                           border: "2px solid var(--accent2)",
@@ -7282,6 +7316,13 @@ export function App() {
                     )}
                   </div>
                   {imageNamePlate("left-0", true)}
+                  <svg aria-hidden="true" style={{ position: "absolute", width: 0, height: 0 }}>
+                    <defs>
+                      <filter id="tone-temp-filter" colorInterpolationFilters="sRGB">
+                        <feColorMatrix type="matrix" values={toneTempMatrix} />
+                      </filter>
+                    </defs>
+                  </svg>
                   <button
                     type="button"
                     aria-label="プレビューに戻る"
@@ -7424,26 +7465,26 @@ export function App() {
                           ["brightness", "明度"],
                           ["saturation", "彩度"],
                           ["contrast", "コントラスト"],
+                          ["temperature", "色温度"],
                         ] as const
                       ).map(([key, label]) => (
-                        <label key={key} className="flex items-center gap-3 text-sm">
-                          <span className="w-14 shrink-0">{label}</span>
+                        <div key={key} className="grid gap-1">
+                          <span className="text-[10px] leading-tight text-[var(--dim)]">
+                            {label} {tone[key] > 0 ? `+${tone[key]}%` : `${tone[key]}%`}
+                          </span>
                           <input
                             type="range"
                             min={-100}
                             max={100}
-                            step={1}
+                            step={5}
                             value={tone[key]}
                             aria-label={`${label}の調整`}
                             onChange={(e) =>
                               setTone((t) => ({ ...t, [key]: Number(e.target.value) }))
                             }
-                            className="min-w-0 flex-1"
+                            className="w-full"
                           />
-                          <span className="w-12 shrink-0 text-right text-xs" style={{ fontFamily: "var(--mono)" }}>
-                            {tone[key] > 0 ? `+${tone[key]}` : tone[key]}%
-                          </span>
-                        </label>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -7476,6 +7517,7 @@ export function App() {
                               brightness: tone.brightness,
                               saturation: tone.saturation,
                               contrast: tone.contrast,
+                              temperature: tone.temperature,
                               drawing,
                             });
                           } else if (
@@ -7488,6 +7530,7 @@ export function App() {
                               brightness: tone.brightness,
                               saturation: tone.saturation,
                               contrast: tone.contrast,
+                              temperature: tone.temperature,
                               drawing,
                             });
                           }
@@ -7624,7 +7667,7 @@ export function App() {
             </div>
             <div data-popup-area="true" className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)]">
               {(editorPopup === "blur" || editorPopup === "brush") && (
-                <div className="absolute inset-x-0 bottom-full">{editorPopupContent}</div>
+                <div>{editorPopupContent}</div>
               )}
               <div
                 className="flex items-stretch"
@@ -7784,7 +7827,7 @@ export function App() {
                     type="button"
                     aria-label="画像加工へ移動"
                     onClick={() => {
-                      setTone({ brightness: 0, saturation: 0, contrast: 0 });
+                      setTone({ brightness: 0, saturation: 0, contrast: 0, temperature: 0 });
                       setToneOpen(false);
                       setDrawOpen(false);
                       setLayerOpen(false);
