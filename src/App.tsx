@@ -7110,43 +7110,13 @@ export function App() {
                       <path d="m14 6-6 6 6 6" />
                     </svg>
                   </button>
-                  <button
-                    type="button"
-                    aria-label="描画"
-                    aria-pressed={drawOpen}
-                    onClick={() => setDrawOpen((v) => !v)}
-                    className="absolute bottom-2 left-2 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
-                    style={{
-                      width: "3.375rem",
-                      height: "3.375rem",
-                      minHeight: "3.375rem",
-                      ...(drawOpen
-                        ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
-                        : {}),
-                    }}
-                  >
-                    <svg
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                      <path d="m15 5 4 4" />
-                    </svg>
-                  </button>
                   {drawOpen && (
                     <div
                       className="absolute inset-x-0 z-10 grid border-t border-[var(--border)] bg-[var(--surface)]"
                       role="group"
                       aria-label="描画操作"
                       style={{
-                        bottom: "4.375rem",
+                        bottom: "0.5rem",
                         gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
                       }}
                     >
@@ -7220,7 +7190,7 @@ export function App() {
                     <p
                       role="alert"
                       className="absolute left-2 max-w-[calc(100%-1rem)] border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
-                      style={{ bottom: drawOpen ? "8.5rem" : "4.5rem" }}
+                      style={{ bottom: drawOpen ? "4.25rem" : "0.5rem" }}
                     >
                       {editError}
                     </p>
@@ -7276,6 +7246,21 @@ export function App() {
               >
                 <button
                   type="button"
+                  aria-label="描画"
+                  aria-pressed={drawOpen}
+                  onClick={() => setDrawOpen((v) => !v)}
+                  className={`flex items-center justify-center px-1 py-0 text-sm font-semibold ${drawOpen ? "" : "bg-[var(--surface)]"}`}
+                  style={{
+                    minHeight: "2.5rem",
+                    ...(drawOpen
+                      ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                      : {}),
+                  }}
+                >
+                  描画
+                </button>
+                <button
+                  type="button"
                   aria-label="色調"
                   aria-pressed={toneOpen}
                   onClick={() => setToneOpen((v) => !v)}
@@ -7289,17 +7274,15 @@ export function App() {
                 >
                   色調
                 </button>
-                {Array.from({ length: 10 }, (_, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    disabled
-                    aria-hidden="true"
-                    tabIndex={-1}
-                    className="flex items-center justify-center px-1 py-0 bg-[var(--surface)]"
-                    style={{ minHeight: "2.5rem" }}
-                  />
-                ))}
+                <button
+                  type="button"
+                  aria-label="変形"
+                  disabled
+                  className="flex items-center justify-center px-1 py-0 bg-[var(--surface)] text-sm font-semibold text-[var(--dim)] disabled:opacity-60"
+                  style={{ minHeight: "2.5rem" }}
+                >
+                  変形
+                </button>
                 <button
                   type="button"
                   aria-label="加工を保存"
