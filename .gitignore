@@ -159,3 +159,6 @@ vite.config.ts.timestamp-*
 # Bun local cache
 .bun-cache/
 mock/.data/
+
+# Pages preview build output (deployed from the gh-pages branch)
+/dist-pages

@@ -9,28 +9,15 @@
 // `./types` — no codegen, no runtime schema.)
 
 import type { Actions } from "./types";
+import { callAction, fetchJson } from "./backend";
+
+export { IS_MOCK_BUILD, MOCK_BADGE_LABEL } from "./backend";
 
 export type ApiRequest<A extends keyof Actions> = Actions[A]["request"];
 export type ApiResponse<A extends keyof Actions> = Actions[A]["response"];
 
 async function call(action: string, args: unknown): Promise<unknown> {
-  const res = await fetch(`./api/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args ?? {}),
-  });
-  let body: unknown = null;
-  try {
-    body = await res.json();
-  } catch {
-    // Non-JSON body: only the status matters below.
-  }
-  if (!res.ok) {
-    const message =
-      (body as { error?: string } | null)?.error ?? `HTTP ${res.status}`;
-    throw new Error(message);
-  }
-  return body;
+  return callAction(action, args);
 }
 
 type Api = {
@@ -65,9 +52,7 @@ export interface SdModelEntry {
 }
 
 export async function fetchSdModels(): Promise<SdModelEntry[]> {
-  const res = await fetch("/sdapi/v1/sd-models");
-  if (!res.ok) throw new Error(`sd-models: HTTP ${res.status}`);
-  const entries = (await res.json()) as {
+  const entries = (await fetchJson("/sdapi/v1/sd-models")) as {
     model_name?: string;
     filename?: string;
   }[];
@@ -89,9 +74,7 @@ export async function fetchSdModels(): Promise<SdModelEntry[]> {
 }
 
 async function fetchSdNames(path: string): Promise<string[]> {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
-  const entries = (await res.json()) as { name?: string }[];
+  const entries = (await fetchJson(path)) as { name?: string }[];
   return entries
     .map((e) => e.name)
     .filter((n): n is string => !!n);

@@ -3,17 +3,39 @@
 // Bun.build over the HTML entry, production NODE_ENV, hashed asset
 // names, tailwind plugin.
 
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import tailwindPlugin from "bun-plugin-tailwind";
 
-// Start from a clean dist: hashed outputs from earlier builds would
-// otherwise accumulate and get published alongside the current ones.
+// MOCK_PAGES=1 builds the temporary, fully self-contained
+// preview for static hosting (e.g. GitHub Pages): the transport
+// module src/backend.ts is swapped for src/backend.mock.ts, so
+// the UI runs against the in-browser mock (src/mockCore.ts) and
+// never touches a server. Output goes to ./dist-pages; the
+// standard build is completely unaffected.
+const MOCK_PAGES = process.env.MOCK_PAGES === "1";
+const OUTDIR = MOCK_PAGES ? "./dist-pages" : "./dist";
+
+const mockBackendPlugin = {
+  name: "mock-backend",
+  setup(build) {
+    build.onResolve({ filter: /^\.\/backend$/ }, (args) => {
+      if (args.importer.endsWith("api.ts")) {
+        return { path: join(process.cwd(), "src", "backend.mock.ts") };
+      }
+      return undefined;
+    });
+  },
+};
+
+// Start from a clean output dir: hashed outputs from earlier
+// builds would otherwise accumulate and get published alongside
+// the current ones.
 import { rm } from "node:fs/promises";
-await rm("./dist", { recursive: true, force: true });
+await rm(OUTDIR, { recursive: true, force: true });
 
 const result = await Bun.build({
   entrypoints: ["./index.html"],
-  outdir: "./dist",
+  outdir: OUTDIR,
   minify: true,
   define: {
     "process.env.NODE_ENV": JSON.stringify("production"),
@@ -23,7 +45,7 @@ const result = await Bun.build({
     chunk: "assets/[name]-[hash].[ext]",
     entry: "[name].[ext]",
   },
-  plugins: [tailwindPlugin],
+  plugins: MOCK_PAGES ? [tailwindPlugin, mockBackendPlugin] : [tailwindPlugin],
 });
 
 if (!result.success) {
@@ -70,9 +92,9 @@ if (!stamp) {
   }
 }
 for (const name of ["manifest.webmanifest", "icon-192.png", "icon-512.png"]) {
-  await copyFile(`./pwa/${name}`, `./dist/${name}`);
+  await copyFile(`./pwa/${name}`, `${OUTDIR}/${name}`);
 }
 const swSource = await readFile("./pwa/sw.js", "utf8");
-await writeFile("./dist/sw.js", swSource.replaceAll("__WB_VERSION__", stamp));
+await writeFile(`${OUTDIR}/sw.js`, swSource.replaceAll("__WB_VERSION__", stamp));
 
-console.log(`built ${result.outputs.length} outputs to ./dist`);
+console.log(`built ${result.outputs.length} outputs to ${OUTDIR}`);

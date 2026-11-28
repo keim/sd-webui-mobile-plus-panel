@@ -6,6 +6,8 @@ import {
   fetchSdModels,
   fileToBase64,
   fetchSdSamplerLists,
+  IS_MOCK_BUILD,
+  MOCK_BADGE_LABEL,
   type ApiRequest,
   type ApiResponse,
 } from "./api";
@@ -6459,6 +6461,15 @@ export function App() {
         overscrollBehavior: "none",
       }}
     >
+      {IS_MOCK_BUILD && MOCK_BADGE_LABEL && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed left-1/2 top-1 z-[100] -translate-x-1/2 whitespace-nowrap rounded-full px-3 py-1 text-[11px] font-bold"
+          style={{ backgroundColor: "var(--err)", color: "#fff" }}
+        >
+          {MOCK_BADGE_LABEL}
+        </div>
+      )}
       <main className="min-h-0 min-w-0">
         {/* ============ Editor pane (formerly Prompt): rows =
             text area / image area / parameter panel. The text

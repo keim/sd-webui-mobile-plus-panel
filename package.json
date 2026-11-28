@@ -19,6 +19,7 @@
   "private": true,
   "scripts": {
     "build": "bun ./build.mjs",
+    "build:pages": "MOCK_PAGES=1 bun ./build.mjs",
     "publish:extension": "bash ./scripts/publish.sh",
     "typecheck": "bun x tsc --noEmit -p tsconfig.json",
     "mock": "bun ./mock/server.mjs"
