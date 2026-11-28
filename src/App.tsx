@@ -487,8 +487,6 @@ const PIXEL_SIZES: number[] = [1024, 1280, 1440];
 // The Inpaint mask brush uses the same list; its blur gets a
 // smaller stepped list of its own (the value is a mask-blur px).
 const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
-const MASK_BLUR_SIZES: number[] = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16];
-
 // Color-temperature channel gains for a -100..100 slider value
 // (positive = warm). The single definition shared by the CSS
 // preview (an SVG feColorMatrix), the eyedropper and — mirrored
@@ -498,21 +496,6 @@ function temperatureGains(t: number): { r: number; g: number; b: number } {
   return { r: 1 + 0.25 * k, g: 1 + 0.05 * k, b: 1 - 0.25 * k };
 }
 
-// Index of the stepped-slider stop nearest to a saved value
-// (saved settings can hold values between stops; the slider
-// snaps to a stop on the first change).
-function nearestStepIndex(sizes: number[], value: number): number {
-  let best = 0;
-  let bestDist = Infinity;
-  sizes.forEach((s, i) => {
-    const d = Math.abs(s - value);
-    if (d < bestDist) {
-      bestDist = d;
-      best = i;
-    }
-  });
-  return best;
-}
 const DEFAULT_PIXEL_SIZE = 1280;
 const DEFAULT_BLOCK_SIZE = "64";
 
@@ -1861,7 +1844,7 @@ export function App() {
   const [promptKeyboardOpen, setPromptKeyboardOpen] = useState(false);
   const promptExpanded = promptFocused && promptKeyboardOpen;
   const [editorPopup, setEditorPopup] = useState<
-    "model" | "style" | "denoise" | "blur" | "brush" | "resize" | null
+    "model" | "style" | "denoise" | "resize" | null
   >(null);
 
   // Editor / Inpaint popup dismissal (same general rule as the
@@ -2292,8 +2275,7 @@ export function App() {
   // The brush sample circle is shown only while its size slider
   // is being changed (one flag per pane).
   const [drawBrushChanging, setDrawBrushChanging] = useState(false);
-  const [maskBrushChanging, setMaskBrushChanging] = useState(false);
-  const [maskBlurChanging, setMaskBlurChanging] = useState(false);
+
   const [drawPainted, setDrawPainted] = useState(false);
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawSnapshotRef = useRef<HTMLCanvasElement | null>(null);
@@ -6196,7 +6178,7 @@ export function App() {
       : "img2img"
     : "txt2img";
 
-  function toggleEditorPopup(name: "model" | "style" | "denoise" | "blur" | "brush" | "resize") {
+  function toggleEditorPopup(name: "model" | "style" | "denoise" | "resize") {
     setEditorPopup((prev) => (prev === name ? null : name));
   }
 
@@ -6213,12 +6195,9 @@ export function App() {
   // painting only.
   // The canvas
   // bitmap is the mask's natural size; it renders at 50% opacity
-  // so painted areas read as 50% white over the image. While the
-  // brush size is being changed, a sample circle is shown at the
-  // preview's centre; the brush diameter is specified in image
-  // pixels, so the circle's on-screen size follows the displayed
-  // image size and the pinch zoom.
-  const brushDiameter = Number(brushSize) || 100;
+  // so painted areas read as 50% white over the image. The brush
+  // diameter is specified in image pixels (the stored brushSize
+  // setting, no longer adjustable from this pane).
   let maskRect: { left: number; top: number; w: number; h: number } | null = null;
   if (inpaintBox && maskNatural && inpaintBox.w > 0 && inpaintBox.h > 0) {
     const aspect = maskNatural.w / maskNatural.h;
@@ -6235,15 +6214,6 @@ export function App() {
       h,
     };
   }
-  const maskSampleDiameter =
-    maskRect && maskNatural
-      ? brushDiameter * (maskRect.w / maskNatural.w) * inpaintZoom.scale
-      : brushDiameter;
-  const blurSampleDiameter =
-    maskRect && maskNatural
-      ? (Number(maskBlur) || 0) * (maskRect.w / maskNatural.w) * inpaintZoom.scale
-      : Number(maskBlur) || 0;
-
   // The 画像加工 drawing canvas's rectangle: the Editor image's
   // drawn (object-contain) area inside the process image area,
   // computed with the same letterbox math as maskRect.
@@ -6326,22 +6296,6 @@ export function App() {
             />
           )}
           </div>
-          {(maskBrushChanging || maskBlurChanging) && (
-            <div
-              aria-hidden="true"
-              data-brush-sample="true"
-              className="pointer-events-none absolute rounded-full"
-              style={{
-                left: "50%",
-                top: "50%",
-                width: maskBlurChanging ? blurSampleDiameter : maskSampleDiameter,
-                height: maskBlurChanging ? blurSampleDiameter : maskSampleDiameter,
-                transform: "translate(-50%, -50%)",
-                backgroundColor: "rgba(255, 255, 255, 0.5)",
-                border: "2px solid var(--accent2)",
-              }}
-            />
-          )}
         </>
       ) : (
         <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
@@ -6573,62 +6527,6 @@ export function App() {
           </button>
         ))}
       </div>
-    </div>
-  ) : editorPopup === "blur" ? (
-    <div className={popupPanelCompactCls} role="dialog" aria-label="ブラー設定">
-      <label className="flex flex-col items-center justify-center gap-1 px-2 py-1">
-        <span className="text-[10px] leading-tight text-[var(--dim)]">
-          ブラー {maskBlur}
-        </span>
-        <input
-          id="blur-slider"
-          aria-label="マスクのブラー値"
-          type="range"
-          min={0}
-          max={MASK_BLUR_SIZES.length - 1}
-          step={1}
-          value={nearestStepIndex(MASK_BLUR_SIZES, Number(maskBlur) || 0)}
-          onChange={(e) => {
-            markSettingsImmediate();
-            const s = MASK_BLUR_SIZES[Number(e.target.value)];
-            if (s != null) setMaskBlur(String(s));
-          }}
-          onPointerDown={() => setMaskBlurChanging(true)}
-          onPointerUp={() => setMaskBlurChanging(false)}
-          onLostPointerCapture={() => setMaskBlurChanging(false)}
-          onFocus={() => setMaskBlurChanging(true)}
-          onBlur={() => setMaskBlurChanging(false)}
-          className="w-full min-w-0"
-        />
-      </label>
-    </div>
-  ) : editorPopup === "brush" ? (
-    <div className={popupPanelCompactCls} role="dialog" aria-label="線幅設定">
-      <label className="flex flex-col items-center justify-center gap-1 px-2 py-1">
-        <span className="text-[10px] leading-tight text-[var(--dim)]">
-          線幅 {brushSize}
-        </span>
-      <input
-        id="brush-slider"
-        aria-label="マスクの線幅"
-        type="range"
-        min={0}
-        max={DRAW_BRUSH_SIZES.length - 1}
-        step={1}
-        value={nearestStepIndex(DRAW_BRUSH_SIZES, Number(brushSize) || 20)}
-        onChange={(e) => {
-          markSettingsImmediate();
-          const s = DRAW_BRUSH_SIZES[Number(e.target.value)];
-          if (s != null) setBrushSize(String(s));
-        }}
-        onPointerDown={() => setMaskBrushChanging(true)}
-        onPointerUp={() => setMaskBrushChanging(false)}
-        onLostPointerCapture={() => setMaskBrushChanging(false)}
-        onFocus={() => setMaskBrushChanging(true)}
-        onBlur={() => setMaskBrushChanging(false)}
-        className="w-full min-w-0"
-      />
-      </label>
     </div>
   ) : null;
 
@@ -7117,7 +7015,7 @@ export function App() {
                 open upward over the image row, as before. --- */}
             {!promptExpanded && (
             <div data-popup-area="true" className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)]">
-              {editorPopup != null && editorPopup !== "blur" && editorPopup !== "brush" && (
+              {editorPopup != null && (
                 <div className="absolute inset-x-0 bottom-full">{editorPopupContent}</div>
               )}
               <div
@@ -7677,12 +7575,8 @@ export function App() {
             <div className="flex min-h-0 min-w-0 flex-col">
               {inpaintImageDisplay}
             </div>
-            <div data-popup-area="true" className="relative shrink-0 border-t border-[var(--border)] bg-[var(--surface)]">
-              {(editorPopup === "blur" || editorPopup === "brush") && (
-                <div>{editorPopupContent}</div>
-              )}
-              <div
-                className="flex items-stretch"
+            <div
+                className="flex shrink-0 items-stretch border-t border-[var(--border)] bg-[var(--surface)]"
                 role="group"
                 aria-label="Inpaintパラメータ"
                 style={{ height: "2.5rem" }}
@@ -7706,10 +7600,8 @@ export function App() {
                 <button
                   type="button"
                   aria-label="ブラー設定"
-                  aria-haspopup="dialog"
-                  aria-expanded={editorPopup === "blur"}
-                  onClick={() => toggleEditorPopup("blur")}
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  disabled
+                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0 disabled:opacity-50"
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">ブラー</span>
@@ -7718,10 +7610,8 @@ export function App() {
                 <button
                   type="button"
                   aria-label="線幅設定"
-                  aria-haspopup="dialog"
-                  aria-expanded={editorPopup === "brush"}
-                  onClick={() => toggleEditorPopup("brush")}
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0"
+                  disabled
+                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0 disabled:opacity-50"
                   style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
                 >
                   <span className="text-[10px] leading-tight text-[var(--dim)]">線幅</span>
@@ -7743,7 +7633,6 @@ export function App() {
                     {penTool === "eraser" ? "消しゴム" : "ペン"}
                   </span>
                 </button>
-              </div>
             </div>
           </section>
         )}
