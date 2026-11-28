@@ -487,6 +487,24 @@ const PIXEL_SIZES: number[] = [1024, 1280, 1440];
 // The Inpaint mask brush uses the same list; its blur gets a
 // smaller stepped list of its own (the value is a mask-blur px).
 const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
+const MASK_BLUR_SIZES: number[] = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16];
+
+// Index of the stepped-slider stop nearest to a saved value
+// (saved settings can hold values between stops; the slider
+// snaps to a stop on the first change).
+function nearestStepIndex(sizes: number[], value: number): number {
+  let best = 0;
+  let bestDist = Infinity;
+  sizes.forEach((s, i) => {
+    const d = Math.abs(s - value);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  });
+  return best;
+}
+
 // Color-temperature channel gains for a -100..100 slider value
 // (positive = warm). The single definition shared by the CSS
 // preview (an SVG feColorMatrix), the eyedropper and — mirrored
@@ -7579,7 +7597,6 @@ export function App() {
                 className="flex shrink-0 items-stretch border-t border-[var(--border)] bg-[var(--surface)]"
                 role="group"
                 aria-label="Inpaintパラメータ"
-                style={{ height: "2.5rem" }}
               >
                 <button
                   type="button"
@@ -7597,26 +7614,50 @@ export function App() {
                     {maskMode === "not masked" ? "outside" : "inside"}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  aria-label="ブラー設定"
-                  disabled
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0 disabled:opacity-50"
-                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                <label
+                  className="flex flex-1 flex-col items-center justify-center gap-1 px-2 py-1"
+                  style={{ minHeight: "3.25rem", borderLeft: "1px solid var(--border)" }}
                 >
-                  <span className="text-[10px] leading-tight text-[var(--dim)]">ブラー</span>
-                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{`${maskBlur}px`}</span>
-                </button>
-                <button
-                  type="button"
-                  aria-label="線幅設定"
-                  disabled
-                  className="flex flex-1 flex-col items-center justify-center bg-[var(--surface)] px-1 py-0 disabled:opacity-50"
-                  style={{ minHeight: "2.5rem", borderLeft: "1px solid var(--border)" }}
+                  <span className="text-[10px] leading-tight text-[var(--dim)]">
+                    ブラー {maskBlur}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={MASK_BLUR_SIZES.length - 1}
+                    step={1}
+                    aria-label="マスクのブラー値"
+                    value={nearestStepIndex(MASK_BLUR_SIZES, Number(maskBlur) || 0)}
+                    onChange={(e) => {
+                      markSettingsImmediate();
+                      const s = MASK_BLUR_SIZES[Number(e.target.value)];
+                      if (s != null) setMaskBlur(String(s));
+                    }}
+                    className="w-full min-w-0"
+                  />
+                </label>
+                <label
+                  className="flex flex-1 flex-col items-center justify-center gap-1 px-2 py-1"
+                  style={{ minHeight: "3.25rem", borderLeft: "1px solid var(--border)" }}
                 >
-                  <span className="text-[10px] leading-tight text-[var(--dim)]">線幅</span>
-                  <span className={`text-sm font-semibold leading-tight ${MONO}`}>{`${brushSize}px`}</span>
-                </button>
+                  <span className="text-[10px] leading-tight text-[var(--dim)]">
+                    線幅 {brushSize}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={DRAW_BRUSH_SIZES.length - 1}
+                    step={1}
+                    aria-label="マスクの線幅"
+                    value={nearestStepIndex(DRAW_BRUSH_SIZES, Number(brushSize) || 20)}
+                    onChange={(e) => {
+                      markSettingsImmediate();
+                      const s = DRAW_BRUSH_SIZES[Number(e.target.value)];
+                      if (s != null) setBrushSize(String(s));
+                    }}
+                    className="w-full min-w-0"
+                  />
+                </label>
                 <button
                   type="button"
                   aria-label="ペンと消しゴムの切り替え"
