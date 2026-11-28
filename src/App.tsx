@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { HexColorPicker } from "react-colorful";
 import {
   api,
   bytesToBase64,
@@ -481,6 +482,9 @@ const SIZE_PORTRAIT_COL: { key: string; sub?: string }[] = [
 // original SizeSelector calculation). Defaults: 1280p, block size 64 —
 // at those values the calculation reproduces the SIZE_PRESETS dimensions.
 const PIXEL_SIZES: number[] = [1024, 1280, 1440];
+// Process-pane brush sizes (display px): a stepped slider walks
+// this list, mirroring the Inpaint brush's sample-circle preview.
+const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
 const DEFAULT_PIXEL_SIZE = 1280;
 const DEFAULT_BLOCK_SIZE = "64";
 
@@ -2226,6 +2230,7 @@ export function App() {
     setDrawOpen(tool === "draw" ? !drawOpen : false);
     setToneOpen(tool === "tone" ? !toneOpen : false);
     setLayerOpen(tool === "layer" ? !layerOpen : false);
+    setColorPickerOpen(false);
   }
   const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0 });
   const [editError, setEditError] = useState<string | null>(null);
@@ -2240,9 +2245,20 @@ export function App() {
   // the tone-adjusted image. Reset on every entry from Preview.
   const [drawOpen, setDrawOpen] = useState(false);
   const [drawColor, setDrawColor] = useState("#000000");
+  const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [drawAlpha, setDrawAlpha] = useState(100);
-  const [drawBrush, setDrawBrush] = useState(24);
+  const [drawBrush, setDrawBrush] = useState(20);
   const [drawTool, setDrawTool] = useState<"pen" | "eraser">("pen");
+  // Long-press eyedropper: a press held ~500ms without moving
+  // adopts the color under the finger and abandons the stroke
+  // it started (no paint is left behind).
+  const drawLongPressRef = useRef<{
+    timer: ReturnType<typeof setTimeout> | null;
+    x: number;
+    y: number;
+    fired: boolean;
+  }>({ timer: null, x: 0, y: 0, fired: false });
+  const pickImageRef = useRef<{ url: string; img: HTMLImageElement } | null>(null);
   const [drawPainted, setDrawPainted] = useState(false);
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawSnapshotRef = useRef<HTMLCanvasElement | null>(null);
@@ -3381,6 +3397,71 @@ export function App() {
     setDrawPainted(drawHasPaint());
   }
 
+  function clearDrawLongPress() {
+    const lp = drawLongPressRef.current;
+    if (lp.timer != null) {
+      clearTimeout(lp.timer);
+      lp.timer = null;
+    }
+  }
+
+  // Eyedropper: sample what the user actually sees — the source
+  // image with the current tone filter applied and the drawing
+  // layer composited on top — at the pressed point, and adopt
+  // it as the pen color.
+  async function pickDrawColor(clientX: number, clientY: number) {
+    const disp = drawDisplayRef.current;
+    const url = editorSource.imageUrl ?? editorSource.displayUrl;
+    if (!disp || !url || disp.width <= 0 || disp.height <= 0) return;
+    const point = drawPointFromEvent({ clientX, clientY });
+    if (!point) return;
+    let img = pickImageRef.current?.url === url ? pickImageRef.current.img : null;
+    if (!img) {
+      img = new Image();
+      img.src = url;
+      try {
+        await img.decode();
+      } catch {
+        return;
+      }
+      pickImageRef.current = { url, img };
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    try {
+      ctx.filter = `brightness(${1 + tone.brightness / 100}) contrast(${1 + tone.contrast / 100}) saturate(${1 + tone.saturation / 100})`;
+    } catch {
+      // Canvas filters are best-effort; sampling proceeds without.
+    }
+    ctx.drawImage(img, 0, 0);
+    try {
+      ctx.filter = "none";
+    } catch {
+      // ignore
+    }
+    const layer = drawCanvasRef.current;
+    if (layer) ctx.drawImage(layer, 0, 0, canvas.width, canvas.height);
+    const sx = Math.min(
+      canvas.width - 1,
+      Math.max(0, Math.round((point.x / disp.width) * canvas.width)),
+    );
+    const sy = Math.min(
+      canvas.height - 1,
+      Math.max(0, Math.round((point.y / disp.height) * canvas.height)),
+    );
+    const d = ctx.getImageData(sx, sy, 1, 1).data;
+    const hex =
+      "#" +
+      [d[0], d[1], d[2]]
+        .map((v) => (v ?? 0).toString(16).padStart(2, "0"))
+        .join("");
+    setDrawColor(hex);
+    setDrawTool("pen");
+  }
+
   function onDrawPointerDown(e: ReactPointerEvent<HTMLCanvasElement>) {
     if (!drawOpen) return;
     // A second finger is the start of a pinch, never a stroke.
@@ -3423,10 +3504,32 @@ export function App() {
       };
       renderDrawPreview();
     }
+    // Arm the long-press eyedropper. If it fires, the stroke in
+    // progress is abandoned (pinch-cancel path) and the color
+    // under the finger is adopted instead of painting.
+    const lp = drawLongPressRef.current;
+    clearDrawLongPress();
+    lp.x = e.clientX;
+    lp.y = e.clientY;
+    lp.fired = false;
+    lp.timer = setTimeout(() => {
+      lp.timer = null;
+      lp.fired = true;
+      cancelDrawStrokeForPinch();
+      void pickDrawColor(lp.x, lp.y);
+    }, 500);
   }
 
   function onDrawPointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
     if (!drawDrawingRef.current) return;
+    // Moving more than a few px is a stroke, not a long-press.
+    const lp = drawLongPressRef.current;
+    if (
+      lp.timer != null &&
+      Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > 10
+    ) {
+      clearDrawLongPress();
+    }
     if (drawTool === "eraser") {
       const point = drawPointFromEvent(e);
       if (!point) return;
@@ -3459,6 +3562,8 @@ export function App() {
   }
 
   function onDrawPointerUp(e: ReactPointerEvent<HTMLCanvasElement>) {
+    clearDrawLongPress();
+    drawLongPressRef.current.fired = false;
     const wasDrawing = drawDrawingRef.current;
     drawDrawingRef.current = false;
     drawLastPointRef.current = null;
@@ -3474,6 +3579,8 @@ export function App() {
   }
 
   function onDrawPointerCancel(e: ReactPointerEvent<HTMLCanvasElement>) {
+    clearDrawLongPress();
+    drawLongPressRef.current.fired = false;
     const wasDrawing = drawDrawingRef.current;
     drawDrawingRef.current = false;
     drawLastPointRef.current = null;
@@ -3494,6 +3601,7 @@ export function App() {
   // is simply discarded (the layer was never touched); an eraser
   // stroke rolls back to the snapshot taken when it began.
   function cancelDrawStrokeForPinch() {
+    clearDrawLongPress();
     if (!drawDrawingRef.current) return;
     drawDrawingRef.current = false;
     drawLastPointRef.current = null;
@@ -5575,21 +5683,26 @@ export function App() {
   // the Editor image display only, flush in its top-left corner —
   // the Inpaint pane shows NO name plate (neither the file name
   // nor the size), so its painting surface stays unobstructed.
-  const imageNamePlate = (positionCls: string) => (
-    <div
-      className={`pointer-events-none absolute top-0 max-w-[70%] px-1.5 py-1 ${positionCls}`}
-      style={{ backgroundColor: "rgba(255, 255, 255, 0.7)" }}
-    >
-      <span className="block truncate text-[10px] leading-tight">
-        {editorImageName}
-      </span>
-      {editorNatural && (
-        <span className={`block truncate text-[10px] leading-tight ${MONO}`}>
-          {`（${editorNatural.w} x ${editorNatural.h}）`}
-        </span>
-      )}
-    </div>
-  );
+  const imageNamePlate = (positionCls: string, hideName = false) => {
+    if (hideName && !editorNatural) return null;
+    return (
+      <div
+        className={`pointer-events-none absolute top-0 max-w-[70%] px-1.5 py-1 ${positionCls}`}
+        style={{ backgroundColor: "rgba(255, 255, 255, 0.7)" }}
+      >
+        {!hideName && (
+          <span className="block truncate text-[10px] leading-tight">
+            {editorImageName}
+          </span>
+        )}
+        {editorNatural && (
+          <span className={`block truncate text-[10px] leading-tight ${MONO}`}>
+            {`（${editorNatural.w} x ${editorNatural.h}）`}
+          </span>
+        )}
+      </div>
+    );
+  };
   // The Editor mask mirror's drawn rectangle (object-contain
   // letterbox of the mask's natural size inside the measured
   // Editor image area) — same math as the Inpaint pane's maskRect.
@@ -7109,7 +7222,7 @@ export function App() {
                       />
                     )}
                   </div>
-                  {imageNamePlate("left-0")}
+                  {imageNamePlate("left-0", true)}
                   <button
                     type="button"
                     aria-label="プレビューに戻る"
@@ -7133,6 +7246,36 @@ export function App() {
                   </button>
                   {drawOpen && (
                     <div
+                      aria-hidden="true"
+                      data-brush-sample="true"
+                      className="pointer-events-none absolute z-10 rounded-full"
+                      style={{
+                        left: "50%",
+                        top: "50%",
+                        width: drawBrush,
+                        height: drawBrush,
+                        transform: "translate(-50%, -50%)",
+                        backgroundColor: "rgba(255, 255, 255, 0.5)",
+                        border: "2px solid var(--accent2)",
+                      }}
+                    />
+                  )}
+                  {drawOpen && colorPickerOpen && (
+                    <div
+                      className="absolute inset-x-2 z-20 border border-[var(--border)] bg-[var(--surface)] p-3"
+                      role="group"
+                      aria-label="色ピッカー"
+                      style={{ bottom: "8rem" }}
+                    >
+                      <HexColorPicker
+                        color={drawColor}
+                        onChange={setDrawColor}
+                        style={{ width: "100%", height: 180 }}
+                      />
+                    </div>
+                  )}
+                  {drawOpen && (
+                    <div
                       className="absolute inset-x-0 z-10 grid border-t border-[var(--border)] bg-[var(--surface)]"
                       role="group"
                       aria-label="描画操作"
@@ -7141,19 +7284,22 @@ export function App() {
                         gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
                       }}
                     >
-                      <label
+                      <button
+                        type="button"
+                        aria-label="描画色"
+                        aria-pressed={colorPickerOpen}
+                        onClick={() => setColorPickerOpen((v) => !v)}
                         className="flex flex-col items-center justify-center gap-1 px-1 py-1"
                         style={{ minHeight: "3.25rem" }}
                       >
                         <span className="text-[10px] leading-tight text-[var(--dim)]">色</span>
-                        <input
-                          type="color"
-                          aria-label="描画色"
-                          value={drawColor}
-                          onChange={(e) => setDrawColor(e.target.value)}
-                          className="h-6 w-10 cursor-pointer"
+                        <span
+                          aria-hidden="true"
+                          data-draw-swatch="true"
+                          className="block h-6 w-10 border border-[var(--border)]"
+                          style={{ backgroundColor: drawColor }}
                         />
-                      </label>
+                      </button>
                       <label
                         className="flex flex-col items-center justify-center gap-1 px-2 py-1"
                         style={{ minHeight: "3.25rem" }}
@@ -7165,7 +7311,7 @@ export function App() {
                           type="range"
                           min={0}
                           max={100}
-                          step={1}
+                          step={10}
                           aria-label="アルファ"
                           value={drawAlpha}
                           onChange={(e) => setDrawAlpha(Number(e.target.value))}
@@ -7181,12 +7327,15 @@ export function App() {
                         </span>
                         <input
                           type="range"
-                          min={1}
-                          max={100}
+                          min={0}
+                          max={DRAW_BRUSH_SIZES.length - 1}
                           step={1}
                           aria-label="ブラシの太さ"
-                          value={drawBrush}
-                          onChange={(e) => setDrawBrush(Number(e.target.value))}
+                          value={Math.max(0, DRAW_BRUSH_SIZES.indexOf(drawBrush))}
+                          onChange={(e) => {
+                            const s = DRAW_BRUSH_SIZES[Number(e.target.value)];
+                            if (s != null) setDrawBrush(s);
+                          }}
                           className="w-full min-w-0"
                         />
                       </label>
@@ -7591,6 +7740,7 @@ export function App() {
                       setToneOpen(false);
                       setDrawOpen(false);
                       setLayerOpen(false);
+                      setColorPickerOpen(false);
                       setDrawTool("pen");
                       resetDrawLayer();
                       setEditError(null);

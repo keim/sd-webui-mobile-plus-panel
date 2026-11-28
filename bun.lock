@@ -7,6 +7,7 @@
       "dependencies": {
         "@tanstack/react-query": "5.100.10",
         "react": "19.2.5",
+        "react-colorful": "^5.8.2",
         "react-dom": "19.2.5",
         "recharts": "2.15.3",
       },
@@ -105,6 +106,8 @@
     "prop-types": ["prop-types@15.8.1", "", { "dependencies": { "loose-envify": "^1.4.0", "object-assign": "^4.1.1", "react-is": "^16.13.1" } }, "sha512-oj87CgZICdulUohogVAR7AjlC0327U4el4L6eAvOqCeudMDVU0NThNaV+b9Df4dXgSP1gXMTnPdhfe/2qDH5cg=="],
 
     "react": ["react@19.2.5", "", {}, "sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA=="],
+
+    "react-colorful": ["react-colorful@5.8.2", "", { "peerDependencies": { "react": ">=16.8.0", "react-dom": ">=16.8.0" } }, "sha512-gZ35jg1OQ71cwpHK74WoIFU4poCy9EjjjYqUGP1C04hn9gH7CD4cd2fGgLT2G/m8oAoxG2bJXjTVP+bBUzonKQ=="],
 
     "react-dom": ["react-dom@19.2.5", "", { "dependencies": { "scheduler": "^0.27.0" }, "peerDependencies": { "react": "^19.2.5" } }, "sha512-J5bAZz+DXMMwW/wV3xzKke59Af6CHY7G4uYLN1OvBcKEsWOs4pQExj86BBKamxl/Ik5bx9whOrvBlSDfWzgSag=="],
 

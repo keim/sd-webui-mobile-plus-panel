@@ -2,6 +2,7 @@
   "dependencies": {
     "@tanstack/react-query": "5.100.10",
     "react": "19.2.5",
+    "react-colorful": "^5.8.2",
     "react-dom": "19.2.5",
     "recharts": "2.15.3"
   },
