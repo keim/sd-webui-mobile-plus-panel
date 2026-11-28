@@ -487,7 +487,10 @@ const PIXEL_SIZES: number[] = [1024, 1280, 1440];
 // The Inpaint mask brush uses the same list; its blur gets a
 // smaller stepped list of its own (the value is a mask-blur px).
 const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
-const MASK_BLUR_SIZES: number[] = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16];
+// The Inpaint blur shares the brush's stepped list (same slider
+// spec as the process pane's draw brush), with 0 (no blur) kept
+// at the head.
+const MASK_BLUR_SIZES: number[] = [0, ...DRAW_BRUSH_SIZES];
 
 // Color-temperature channel gains for a -100..100 slider value
 // (positive = warm). The single definition shared by the CSS
@@ -2293,6 +2296,7 @@ export function App() {
   // is being changed (one flag per pane).
   const [drawBrushChanging, setDrawBrushChanging] = useState(false);
   const [maskBrushChanging, setMaskBrushChanging] = useState(false);
+  const [maskBlurChanging, setMaskBlurChanging] = useState(false);
   const [drawPainted, setDrawPainted] = useState(false);
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawSnapshotRef = useRef<HTMLCanvasElement | null>(null);
@@ -6238,6 +6242,10 @@ export function App() {
     maskRect && maskNatural
       ? brushDiameter * (maskRect.w / maskNatural.w) * inpaintZoom.scale
       : brushDiameter;
+  const blurSampleDiameter =
+    maskRect && maskNatural
+      ? (Number(maskBlur) || 0) * (maskRect.w / maskNatural.w) * inpaintZoom.scale
+      : Number(maskBlur) || 0;
 
   // The 画像加工 drawing canvas's rectangle: the Editor image's
   // drawn (object-contain) area inside the process image area,
@@ -6321,7 +6329,7 @@ export function App() {
             />
           )}
           </div>
-          {maskBrushChanging && (
+          {(maskBrushChanging || maskBlurChanging) && (
             <div
               aria-hidden="true"
               data-brush-sample="true"
@@ -6329,8 +6337,8 @@ export function App() {
               style={{
                 left: "50%",
                 top: "50%",
-                width: maskSampleDiameter,
-                height: maskSampleDiameter,
+                width: maskBlurChanging ? blurSampleDiameter : maskSampleDiameter,
+                height: maskBlurChanging ? blurSampleDiameter : maskSampleDiameter,
                 transform: "translate(-50%, -50%)",
                 backgroundColor: "rgba(255, 255, 255, 0.5)",
                 border: "2px solid var(--accent2)",
@@ -6571,32 +6579,38 @@ export function App() {
     </div>
   ) : editorPopup === "blur" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="ブラー設定">
-      <label htmlFor="blur-slider" className="flex items-center justify-between text-sm">
-        <span>ブラー</span>
-        <span className={MONO}>{maskBlur}px</span>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] leading-tight text-[var(--dim)]">
+          ブラー {maskBlur}
+        </span>
+        <input
+          id="blur-slider"
+          aria-label="マスクのブラー値"
+          type="range"
+          min={0}
+          max={MASK_BLUR_SIZES.length - 1}
+          step={1}
+          value={nearestStepIndex(MASK_BLUR_SIZES, Number(maskBlur) || 0)}
+          onChange={(e) => {
+            markSettingsImmediate();
+            const s = MASK_BLUR_SIZES[Number(e.target.value)];
+            if (s != null) setMaskBlur(String(s));
+          }}
+          onPointerDown={() => setMaskBlurChanging(true)}
+          onPointerUp={() => setMaskBlurChanging(false)}
+          onLostPointerCapture={() => setMaskBlurChanging(false)}
+          onFocus={() => setMaskBlurChanging(true)}
+          onBlur={() => setMaskBlurChanging(false)}
+          className="w-full"
+        />
       </label>
-      <input
-        id="blur-slider"
-        aria-label="マスクのブラー値"
-        type="range"
-        min={0}
-        max={MASK_BLUR_SIZES.length - 1}
-        step={1}
-        value={nearestStepIndex(MASK_BLUR_SIZES, Number(maskBlur) || 0)}
-        onChange={(e) => {
-          markSettingsImmediate();
-          const s = MASK_BLUR_SIZES[Number(e.target.value)];
-          if (s != null) setMaskBlur(String(s));
-        }}
-        className="w-full"
-      />
     </div>
   ) : editorPopup === "brush" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="線幅設定">
-      <label htmlFor="brush-slider" className="flex items-center justify-between text-sm">
-        <span>線幅</span>
-        <span className={MONO}>{brushSize}px</span>
-      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] leading-tight text-[var(--dim)]">
+          線幅 {brushSize}
+        </span>
       <input
         id="brush-slider"
         aria-label="マスクの線幅"
@@ -6617,6 +6631,7 @@ export function App() {
         onBlur={() => setMaskBrushChanging(false)}
         className="w-full"
       />
+      </label>
     </div>
   ) : null;
 
