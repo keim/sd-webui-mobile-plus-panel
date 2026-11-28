@@ -2235,6 +2235,20 @@ export function App() {
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawSnapshotRef = useRef<HTMLCanvasElement | null>(null);
   const drawDisplayRef = useRef<HTMLCanvasElement | null>(null);
+  // Pen strokes (experimental, 2026-11-28): the path is
+  // accumulated as a point list and rendered on the preview
+  // canvas while stroking; the layer canvas is touched only on
+  // pointer-up, in ONE stroke of the whole path. A cancel or a
+  // pinch simply discards the preview. The eraser keeps the
+  // original immediate per-segment painting.
+  const drawPreviewRef = useRef<HTMLCanvasElement | null>(null);
+  const drawPointsRef = useRef<{ x: number; y: number }[]>([]);
+  const drawStrokeStyleRef = useRef<{
+    color: string;
+    alpha: number;
+    brush: number;
+    scale: number;
+  } | null>(null);
   const drawDrawingRef = useRef(false);
   const drawLastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [drawNatural, setDrawNatural] = useState<{ w: number; h: number } | null>(null);
@@ -3159,6 +3173,7 @@ export function App() {
     drawSourceRef.current = editorSourceIdentity;
     drawDrawingRef.current = false;
     drawLastPointRef.current = null;
+    discardDrawPreview();
     const sizingUrl = editorSource.imageUrl ?? editorSource.displayUrl;
     if (editorSource.kind === "none" || !sizingUrl) {
       drawCanvasRef.current = null;
@@ -3208,14 +3223,19 @@ export function App() {
   }, [tab]);
 
   // Mirror the offscreen drawing onto the visible canvas whenever
-  // the process pane (re)mounts or the layer is (re)created.
+  // the process pane (re)mounts or the layer is (re)created. The
+  // preview canvas is sized alongside (it starts empty).
   useEffect(() => {
     if (tab !== "process") return;
-    const disp = drawDisplayRef.current;
     const src = drawCanvasRef.current;
-    if (!disp || !src) return;
-    if (disp.width !== src.width) disp.width = src.width;
-    if (disp.height !== src.height) disp.height = src.height;
+    if (!src) return;
+    for (const disp of [drawDisplayRef.current, drawPreviewRef.current]) {
+      if (!disp) continue;
+      if (disp.width !== src.width) disp.width = src.width;
+      if (disp.height !== src.height) disp.height = src.height;
+    }
+    const disp = drawDisplayRef.current;
+    if (!disp) return;
     const ctx = disp.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, disp.width, disp.height);
@@ -3273,9 +3293,80 @@ export function App() {
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = 1;
     // A pen stroke always leaves paint behind; the eraser case is
-    // settled exactly on pointer-up (see onDrawPointerEnd).
+    // settled exactly on pointer-up (see onDrawPointerUp).
     if (drawTool !== "eraser") setDrawPainted(true);
     syncDrawDisplay();
+  }
+
+  // Strokes a whole point list as ONE path (moveTo the first
+  // point, lineTo through the rest, stroke once) with the style
+  // captured at stroke start. Used for both the pen preview and
+  // the one-shot commit, so the two always match.
+  function strokeDrawPath(
+    ctx: CanvasRenderingContext2D,
+    points: { x: number; y: number }[],
+    style: { color: string; alpha: number; brush: number; scale: number },
+  ) {
+    ctx.lineWidth = (Number(style.brush) || 24) * style.scale;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.globalAlpha = Math.max(0, Math.min(100, style.alpha)) / 100;
+    ctx.globalCompositeOperation = "source-over";
+    ctx.strokeStyle = style.color;
+    ctx.beginPath();
+    const first = points[0] as { x: number; y: number };
+    ctx.moveTo(first.x, first.y);
+    if (points.length === 1) {
+      ctx.lineTo(first.x, first.y);
+    } else {
+      for (let i = 1; i < points.length; i++) {
+        const p = points[i] as { x: number; y: number };
+        ctx.lineTo(p.x, p.y);
+      }
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function renderDrawPreview() {
+    const disp = drawPreviewRef.current;
+    if (!disp) return;
+    const ctx = disp.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, disp.width, disp.height);
+    const style = drawStrokeStyleRef.current;
+    const points = drawPointsRef.current;
+    if (!style || points.length === 0) return;
+    strokeDrawPath(ctx, points, style);
+  }
+
+  // Drops the in-progress pen stroke without touching the layer
+  // (pointer-cancel, pinch, pane/source changes).
+  function discardDrawPreview() {
+    drawPointsRef.current = [];
+    drawStrokeStyleRef.current = null;
+    const disp = drawPreviewRef.current;
+    if (disp) {
+      const ctx = disp.getContext("2d");
+      if (ctx) ctx.clearRect(0, 0, disp.width, disp.height);
+    }
+  }
+
+  // Pointer-up for a pen stroke: the accumulated path is stroked
+  // onto the layer canvas in ONE call — uniform alpha along the
+  // stroke, no build-up at segment joints or self-crossings —
+  // then the preview is cleared and the mirror re-synced.
+  function commitDrawStroke() {
+    const canvas = drawCanvasRef.current;
+    const style = drawStrokeStyleRef.current;
+    const points = drawPointsRef.current;
+    if (canvas && style && points.length > 0) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) strokeDrawPath(ctx, points, style);
+    }
+    discardDrawPreview();
+    syncDrawDisplay();
+    setDrawPainted(drawHasPaint());
   }
 
   function onDrawPointerDown(e: ReactPointerEvent<HTMLCanvasElement>) {
@@ -3291,46 +3382,113 @@ export function App() {
       // A synthetic or already-released pointer: painting still
       // works without capture.
     }
-    // Snapshot the layer so a pinch can roll this stroke back.
-    const src = drawCanvasRef.current;
-    if (src) {
-      if (!drawSnapshotRef.current) {
-        drawSnapshotRef.current = document.createElement("canvas");
-      }
-      const snap = drawSnapshotRef.current;
-      snap.width = src.width;
-      snap.height = src.height;
-      snap.getContext("2d")?.drawImage(src, 0, 0);
-    }
     drawDrawingRef.current = true;
     drawLastPointRef.current = point;
-    drawDrawStroke(point, point, point.scale);
+    if (drawTool === "eraser") {
+      // The eraser paints immediately (unchanged): snapshot the
+      // layer so a pinch can roll this stroke back.
+      const src = drawCanvasRef.current;
+      if (src) {
+        if (!drawSnapshotRef.current) {
+          drawSnapshotRef.current = document.createElement("canvas");
+        }
+        const snap = drawSnapshotRef.current;
+        snap.width = src.width;
+        snap.height = src.height;
+        snap.getContext("2d")?.drawImage(src, 0, 0);
+      }
+      drawDrawStroke(point, point, point.scale);
+    } else {
+      // Pen: accumulate the path on the preview canvas; the
+      // layer itself is touched only on pointer-up. The tool
+      // settings are fixed at stroke start.
+      drawPointsRef.current = [{ x: point.x, y: point.y }];
+      drawStrokeStyleRef.current = {
+        color: drawColor,
+        alpha: drawAlpha,
+        brush: drawBrush,
+        scale: point.scale,
+      };
+      renderDrawPreview();
+    }
   }
 
   function onDrawPointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
     if (!drawDrawingRef.current) return;
-    const point = drawPointFromEvent(e);
-    if (!point) return;
-    const last = drawLastPointRef.current ?? point;
-    drawDrawStroke(last, point, point.scale);
-    drawLastPointRef.current = point;
+    if (drawTool === "eraser") {
+      const point = drawPointFromEvent(e);
+      if (!point) return;
+      const last = drawLastPointRef.current ?? point;
+      drawDrawStroke(last, point, point.scale);
+      drawLastPointRef.current = point;
+      return;
+    }
+    // Pen: append this event's coalesced points (an empty list —
+    // synthetic events — falls back to the event itself) and
+    // re-render the whole path on the preview canvas.
+    const native = e.nativeEvent;
+    const coalesced =
+      typeof native.getCoalescedEvents === "function"
+        ? native.getCoalescedEvents()
+        : [];
+    const sources = coalesced.length > 0 ? coalesced : [native];
+    let appended = false;
+    for (const srcEvent of sources) {
+      const p = drawPointFromEvent(srcEvent);
+      if (!p) continue;
+      drawPointsRef.current.push({ x: p.x, y: p.y });
+      if (drawStrokeStyleRef.current) {
+        drawStrokeStyleRef.current.scale = p.scale;
+      }
+      drawLastPointRef.current = p;
+      appended = true;
+    }
+    if (appended) renderDrawPreview();
   }
 
-  function onDrawPointerEnd(e: ReactPointerEvent<HTMLCanvasElement>) {
+  function onDrawPointerUp(e: ReactPointerEvent<HTMLCanvasElement>) {
+    const wasDrawing = drawDrawingRef.current;
     drawDrawingRef.current = false;
     drawLastPointRef.current = null;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
-    setDrawPainted(drawHasPaint());
+    if (!wasDrawing) return;
+    if (drawTool === "eraser") {
+      setDrawPainted(drawHasPaint());
+    } else {
+      commitDrawStroke();
+    }
   }
 
-  // A pinch starting mid-stroke cancels the stroke: the layer
-  // rolls back to the snapshot taken when the stroke began.
+  function onDrawPointerCancel(e: ReactPointerEvent<HTMLCanvasElement>) {
+    const wasDrawing = drawDrawingRef.current;
+    drawDrawingRef.current = false;
+    drawLastPointRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    if (!wasDrawing) return;
+    if (drawTool === "eraser") {
+      // Unchanged: a cancel settles an eraser stroke like an up.
+      setDrawPainted(drawHasPaint());
+    } else {
+      // A cancelled pen stroke is discarded, never committed.
+      discardDrawPreview();
+    }
+  }
+
+  // A pinch starting mid-stroke cancels the stroke: a pen stroke
+  // is simply discarded (the layer was never touched); an eraser
+  // stroke rolls back to the snapshot taken when it began.
   function cancelDrawStrokeForPinch() {
     if (!drawDrawingRef.current) return;
     drawDrawingRef.current = false;
     drawLastPointRef.current = null;
+    if (drawTool !== "eraser") {
+      discardDrawPreview();
+      return;
+    }
     const canvas = drawCanvasRef.current;
     const snap = drawSnapshotRef.current;
     if (canvas && snap && canvas.width === snap.width && canvas.height === snap.height) {
@@ -3348,6 +3506,7 @@ export function App() {
 
   // Wipe the whole drawing layer (pane entry / a successful save).
   function resetDrawLayer() {
+    discardDrawPreview();
     const canvas = drawCanvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext("2d");
@@ -6891,13 +7050,31 @@ export function App() {
                       <canvas
                         ref={drawDisplayRef}
                         data-draw-canvas="true"
+                        aria-hidden="true"
+                        width={drawNatural.w}
+                        height={drawNatural.h}
+                        className="absolute"
+                        style={{
+                          left: drawRect.left,
+                          top: drawRect.top,
+                          width: drawRect.w,
+                          height: drawRect.h,
+                          pointerEvents: "none",
+                          transform: processZoom.transform,
+                        }}
+                      />
+                    )}
+                    {drawRect && drawNatural && (
+                      <canvas
+                        ref={drawPreviewRef}
+                        data-draw-preview-canvas="true"
                         aria-label="描画エリア"
                         width={drawNatural.w}
                         height={drawNatural.h}
                         onPointerDown={onDrawPointerDown}
                         onPointerMove={onDrawPointerMove}
-                        onPointerUp={onDrawPointerEnd}
-                        onPointerCancel={onDrawPointerEnd}
+                        onPointerUp={onDrawPointerUp}
+                        onPointerCancel={onDrawPointerCancel}
                         className="absolute"
                         style={{
                           left: drawRect.left,
