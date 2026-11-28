@@ -2293,6 +2293,8 @@ export function App() {
   // The brush sample circle is shown only while its size slider
   // is being changed (one flag per pane).
   const [drawBrushChanging, setDrawBrushChanging] = useState(false);
+  const [maskBrushChanging, setMaskBrushChanging] = useState(false);
+  const [maskBlurChanging, setMaskBlurChanging] = useState(false);
 
   const [drawPainted, setDrawPainted] = useState(false);
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -6213,9 +6215,12 @@ export function App() {
   // painting only.
   // The canvas
   // bitmap is the mask's natural size; it renders at 50% opacity
-  // so painted areas read as 50% white over the image. The brush
-  // diameter is specified in image pixels (the stored brushSize
-  // setting, no longer adjustable from this pane).
+  // so painted areas read as 50% white over the image. While the
+  // brush size or blur is being changed, a sample circle is shown
+  // at the preview's centre; both values are specified in image
+  // pixels, so the circle's on-screen size follows the displayed
+  // image size and the pinch zoom.
+  const brushDiameter = Number(brushSize) || 100;
   let maskRect: { left: number; top: number; w: number; h: number } | null = null;
   if (inpaintBox && maskNatural && inpaintBox.w > 0 && inpaintBox.h > 0) {
     const aspect = maskNatural.w / maskNatural.h;
@@ -6232,6 +6237,14 @@ export function App() {
       h,
     };
   }
+  const maskSampleDiameter =
+    maskRect && maskNatural
+      ? brushDiameter * (maskRect.w / maskNatural.w) * inpaintZoom.scale
+      : brushDiameter;
+  const blurSampleDiameter =
+    maskRect && maskNatural
+      ? (Number(maskBlur) || 0) * (maskRect.w / maskNatural.w) * inpaintZoom.scale
+      : Number(maskBlur) || 0;
   // The 画像加工 drawing canvas's rectangle: the Editor image's
   // drawn (object-contain) area inside the process image area,
   // computed with the same letterbox math as maskRect.
@@ -6314,6 +6327,22 @@ export function App() {
             />
           )}
           </div>
+          {(maskBrushChanging || maskBlurChanging) && (
+            <div
+              aria-hidden="true"
+              data-brush-sample="true"
+              className="pointer-events-none absolute rounded-full"
+              style={{
+                left: "50%",
+                top: "50%",
+                width: maskBlurChanging ? blurSampleDiameter : maskSampleDiameter,
+                height: maskBlurChanging ? blurSampleDiameter : maskSampleDiameter,
+                transform: "translate(-50%, -50%)",
+                backgroundColor: "rgba(255, 255, 255, 0.5)",
+                border: "2px solid var(--accent2)",
+              }}
+            />
+          )}
         </>
       ) : (
         <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
@@ -7633,6 +7662,11 @@ export function App() {
                       const s = MASK_BLUR_SIZES[Number(e.target.value)];
                       if (s != null) setMaskBlur(String(s));
                     }}
+                    onPointerDown={() => setMaskBlurChanging(true)}
+                    onPointerUp={() => setMaskBlurChanging(false)}
+                    onLostPointerCapture={() => setMaskBlurChanging(false)}
+                    onFocus={() => setMaskBlurChanging(true)}
+                    onBlur={() => setMaskBlurChanging(false)}
                     className="w-full min-w-0"
                   />
                 </label>
@@ -7655,6 +7689,11 @@ export function App() {
                       const s = DRAW_BRUSH_SIZES[Number(e.target.value)];
                       if (s != null) setBrushSize(String(s));
                     }}
+                    onPointerDown={() => setMaskBrushChanging(true)}
+                    onPointerUp={() => setMaskBrushChanging(false)}
+                    onLostPointerCapture={() => setMaskBrushChanging(false)}
+                    onFocus={() => setMaskBrushChanging(true)}
+                    onBlur={() => setMaskBrushChanging(false)}
                     className="w-full min-w-0"
                   />
                 </label>
