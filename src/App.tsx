@@ -484,7 +484,26 @@ const SIZE_PORTRAIT_COL: { key: string; sub?: string }[] = [
 const PIXEL_SIZES: number[] = [1024, 1280, 1440];
 // Process-pane brush sizes (display px): a stepped slider walks
 // this list, mirroring the Inpaint brush's sample-circle preview.
+// The Inpaint mask brush uses the same list; its blur gets a
+// smaller stepped list of its own (the value is a mask-blur px).
 const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
+const MASK_BLUR_SIZES: number[] = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16];
+
+// Index of the stepped-slider stop nearest to a saved value
+// (saved settings can hold values between stops; the slider
+// snaps to a stop on the first change).
+function nearestStepIndex(sizes: number[], value: number): number {
+  let best = 0;
+  let bestDist = Infinity;
+  sizes.forEach((s, i) => {
+    const d = Math.abs(s - value);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  });
+  return best;
+}
 const DEFAULT_PIXEL_SIZE = 1280;
 const DEFAULT_BLOCK_SIZE = "64";
 
@@ -560,9 +579,10 @@ function useImageZoom(
     gestureRef.current = null;
   }, [resetKey]);
 
+  // Pinch zoom range: -50% .. +300% (0.5x .. 4x). The view is
+  // re-centered only by the double-tap reset, never mid-gesture.
   const clampView = (v: { scale: number; tx: number; ty: number }) => {
-    const scale = Math.min(5, Math.max(1, v.scale));
-    if (scale === 1) return { scale: 1, tx: 0, ty: 0 };
+    const scale = Math.min(4, Math.max(0.5, v.scale));
     const w = areaRef.current?.clientWidth ?? 0;
     const h = areaRef.current?.clientHeight ?? 0;
     const maxTx = (w * scale) / 2;
@@ -631,7 +651,7 @@ function useImageZoom(
           x: (p0.x + p1.x) / 2,
           y: (p0.y + p1.y) / 2,
         };
-        const scale = Math.min(5, Math.max(1, g.startScale * (dist / g.startDist)));
+        const scale = Math.min(4, Math.max(0.5, g.startScale * (dist / g.startDist)));
         // The content point that sat under the start focal, and
         // where that focal has travelled to (two-finger pan).
         const px = (g.focal.x - g.startTx) / g.startScale;
@@ -690,7 +710,7 @@ function useImageZoom(
       };
       setView((v) => {
         const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const scale = Math.min(5, Math.max(1, v.scale * factor));
+        const scale = Math.min(4, Math.max(0.5, v.scale * factor));
         const px = (f.x - v.tx) / v.scale;
         const py = (f.y - v.ty) / v.scale;
         return clampView({ scale, tx: f.x - px * scale, ty: f.y - py * scale });
@@ -2259,6 +2279,10 @@ export function App() {
     fired: boolean;
   }>({ timer: null, x: 0, y: 0, fired: false });
   const pickImageRef = useRef<{ url: string; img: HTMLImageElement } | null>(null);
+  // The brush sample circle is shown only while its size slider
+  // is being changed (one flag per pane).
+  const [drawBrushChanging, setDrawBrushChanging] = useState(false);
+  const [maskBrushChanging, setMaskBrushChanging] = useState(false);
   const [drawPainted, setDrawPainted] = useState(false);
   const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawSnapshotRef = useRef<HTMLCanvasElement | null>(null);
@@ -6263,7 +6287,7 @@ export function App() {
             />
           )}
           </div>
-          {editorPopup === "brush" && (
+          {maskBrushChanging && (
             <div
               aria-hidden="true"
               data-brush-sample="true"
@@ -6522,10 +6546,14 @@ export function App() {
         aria-label="マスクのブラー値"
         type="range"
         min={0}
-        max={16}
+        max={MASK_BLUR_SIZES.length - 1}
         step={1}
-        value={maskBlur}
-        onChange={(e) => { markSettingsImmediate(); setMaskBlur(e.target.value); }}
+        value={nearestStepIndex(MASK_BLUR_SIZES, Number(maskBlur) || 0)}
+        onChange={(e) => {
+          markSettingsImmediate();
+          const s = MASK_BLUR_SIZES[Number(e.target.value)];
+          if (s != null) setMaskBlur(String(s));
+        }}
         className="w-full"
       />
     </div>
@@ -6539,11 +6567,20 @@ export function App() {
         id="brush-slider"
         aria-label="マスクの線幅"
         type="range"
-        min={4}
-        max={200}
-        step={4}
-        value={brushSize}
-        onChange={(e) => { markSettingsImmediate(); setBrushSize(e.target.value); }}
+        min={0}
+        max={DRAW_BRUSH_SIZES.length - 1}
+        step={1}
+        value={nearestStepIndex(DRAW_BRUSH_SIZES, Number(brushSize) || 20)}
+        onChange={(e) => {
+          markSettingsImmediate();
+          const s = DRAW_BRUSH_SIZES[Number(e.target.value)];
+          if (s != null) setBrushSize(String(s));
+        }}
+        onPointerDown={() => setMaskBrushChanging(true)}
+        onPointerUp={() => setMaskBrushChanging(false)}
+        onLostPointerCapture={() => setMaskBrushChanging(false)}
+        onFocus={() => setMaskBrushChanging(true)}
+        onBlur={() => setMaskBrushChanging(false)}
         className="w-full"
       />
     </div>
@@ -7168,7 +7205,13 @@ export function App() {
                     }}
                     {...processZoom.handlers}
                     className="absolute inset-0 flex items-center justify-center overflow-hidden bg-[var(--surface-alt)]"
-                    style={{ touchAction: "none" }}
+                    style={{
+                      touchAction: "none",
+                      // Center the view in the area the floating
+                      // capsule menu does not cover (menu height
+                      // 3.375rem + its 0.5rem bottom offset).
+                      bottom: "calc(3.875rem + env(safe-area-inset-bottom))",
+                    }}
                   >
                     <img
                       src={editorSource.displayUrl}
@@ -7221,6 +7264,22 @@ export function App() {
                         }}
                       />
                     )}
+                    {drawBrushChanging && (
+                      <div
+                        aria-hidden="true"
+                        data-brush-sample="true"
+                        className="pointer-events-none absolute z-10 rounded-full"
+                        style={{
+                          left: "50%",
+                          top: "50%",
+                          width: drawBrush,
+                          height: drawBrush,
+                          transform: "translate(-50%, -50%)",
+                          backgroundColor: "rgba(255, 255, 255, 0.5)",
+                          border: "2px solid var(--accent2)",
+                        }}
+                      />
+                    )}
                   </div>
                   {imageNamePlate("left-0", true)}
                   <button
@@ -7244,22 +7303,6 @@ export function App() {
                       <path d="m14 6-6 6 6 6" />
                     </svg>
                   </button>
-                  {drawOpen && (
-                    <div
-                      aria-hidden="true"
-                      data-brush-sample="true"
-                      className="pointer-events-none absolute z-10 rounded-full"
-                      style={{
-                        left: "50%",
-                        top: "50%",
-                        width: drawBrush,
-                        height: drawBrush,
-                        transform: "translate(-50%, -50%)",
-                        backgroundColor: "rgba(255, 255, 255, 0.5)",
-                        border: "2px solid var(--accent2)",
-                      }}
-                    />
-                  )}
                   {drawOpen && colorPickerOpen && (
                     <div
                       className="absolute inset-x-2 z-20 border border-[var(--border)] bg-[var(--surface)] p-3"
@@ -7336,6 +7379,11 @@ export function App() {
                             const s = DRAW_BRUSH_SIZES[Number(e.target.value)];
                             if (s != null) setDrawBrush(s);
                           }}
+                          onPointerDown={() => setDrawBrushChanging(true)}
+                          onPointerUp={() => setDrawBrushChanging(false)}
+                          onLostPointerCapture={() => setDrawBrushChanging(false)}
+                          onFocus={() => setDrawBrushChanging(true)}
+                          onBlur={() => setDrawBrushChanging(false)}
                           className="w-full min-w-0"
                         />
                       </label>
