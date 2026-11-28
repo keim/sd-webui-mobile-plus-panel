@@ -305,6 +305,10 @@ export interface Actions {
       brightness: number;
       saturation: number;
       contrast: number;
+      // 描画レイヤー (raw base64 PNG at the source's natural
+      // size, transparent background); composited over the
+      // tone-adjusted image when present.
+      drawing?: string;
     };
     response: CreateJobResponse;
   };

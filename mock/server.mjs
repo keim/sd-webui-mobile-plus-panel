@@ -590,6 +590,9 @@ const ACTIONS = {
     const brightness = clampPct(args.brightness);
     const saturation = clampPct(args.saturation);
     const contrast = clampPct(args.contrast);
+    const drawing =
+      typeof args.drawing === "string" && args.drawing.length > 0;
+    state.lastEditedDrawing = drawing;
     const srcJob =
       args.sourceKind === "job" ? state.jobs.get(args.jobId) : undefined;
     const srcUpload =
@@ -625,6 +628,7 @@ const ACTIONS = {
         sourceJobId: srcJob?.id ?? null,
         sourceUploadId: srcUpload?.id ?? null,
         brightness, saturation, contrast,
+        drawing,
         mock: true,
       }),
       loraHashes: null, error: null,
@@ -793,6 +797,7 @@ const server = Bun.serve({
       return Response.json({
         saveSettingsCalls: state.saveSettingsCalls,
         savePromptCalls: state.savePromptCalls,
+        lastEditedDrawing: state.lastEditedDrawing ?? false,
         settingsEmpty: state.settings === "",
       });
     }

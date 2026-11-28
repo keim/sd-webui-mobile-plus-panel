@@ -2054,6 +2054,8 @@ export function App() {
       void queryClient.invalidateQueries({ queryKey: ["editorSource"] });
       setTone({ brightness: 0, saturation: 0, contrast: 0 });
       setToneOpen(false);
+      setDrawOpen(false);
+      resetDrawLayer();
       setEditError(null);
       switchTab("editor");
     },
@@ -2215,6 +2217,29 @@ export function App() {
   const [toneOpen, setToneOpen] = useState(false);
   const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0 });
   const [editError, setEditError] = useState<string | null>(null);
+  // 画像加工の描画: freehand drawing over the image, operated like
+  // the Inpaint mask (offscreen canvas at the image's natural
+  // size, a visible mirror canvas, single-pointer strokes, a
+  // pinch rolling the in-progress stroke back). Unlike the mask
+  // the layer holds real colors with an adjustable alpha, brush
+  // size and pen/eraser tool, chosen in the popup panel over the
+  // image. Painting is live only while the panel is open. On save
+  // the layer goes to the server as a PNG and is composited over
+  // the tone-adjusted image. Reset on every entry from Preview.
+  const [drawOpen, setDrawOpen] = useState(false);
+  const [drawColor, setDrawColor] = useState("#000000");
+  const [drawAlpha, setDrawAlpha] = useState(100);
+  const [drawBrush, setDrawBrush] = useState(24);
+  const [drawTool, setDrawTool] = useState<"pen" | "eraser">("pen");
+  const [drawPainted, setDrawPainted] = useState(false);
+  const drawCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawSnapshotRef = useRef<HTMLCanvasElement | null>(null);
+  const drawDisplayRef = useRef<HTMLCanvasElement | null>(null);
+  const drawDrawingRef = useRef(false);
+  const drawLastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const [drawNatural, setDrawNatural] = useState<{ w: number; h: number } | null>(null);
+  const [processBox, setProcessBox] = useState<{ w: number; h: number } | null>(null);
+  const processBoxRef = useRef<HTMLDivElement | null>(null);
   // Pinch zoom / drag pan for the Preview and 画像加工 images.
   // The key includes the pane so leaving a pane resets its view.
   const previewZoom = useImageZoom(
@@ -2222,6 +2247,7 @@ export function App() {
   );
   const processZoom = useImageZoom(
     tab === "process" ? (editorSource.displayUrl ?? "none") : null,
+    { onPinchStart: cancelDrawStrokeForPinch },
   );
   const inpaintZoom = useImageZoom(
     tab === "inpaint" ? (sourceImage.displayUrl ?? "none") : null,
@@ -3118,6 +3144,243 @@ export function App() {
     }
     octx.putImageData(dst, 0, 0);
     const url = out.toDataURL("image/png");
+    return url.split(",")[1] ?? null;
+  }
+
+  // --- 画像加工の描画 layer (mirrors the Inpaint mask machinery) ---
+  // The drawing lives in an offscreen canvas at the Editor image's
+  // NATURAL pixel size; the process pane's visible canvas mirrors
+  // it over the image's drawn (object-contain) rectangle. A source
+  // replacement at the same pixel size keeps the drawing; a size
+  // change resets it to fully transparent.
+  const drawSourceRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (drawSourceRef.current === editorSourceIdentity) return;
+    drawSourceRef.current = editorSourceIdentity;
+    drawDrawingRef.current = false;
+    drawLastPointRef.current = null;
+    const sizingUrl = editorSource.imageUrl ?? editorSource.displayUrl;
+    if (editorSource.kind === "none" || !sizingUrl) {
+      drawCanvasRef.current = null;
+      setDrawNatural(null);
+      setDrawPainted(false);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      if (w <= 0 || h <= 0) return;
+      const existing = drawCanvasRef.current;
+      if (existing && existing.width === w && existing.height === h) {
+        setDrawNatural({ w, h });
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      drawCanvasRef.current = canvas;
+      setDrawNatural({ w, h });
+      setDrawPainted(false);
+    };
+    img.src = sizingUrl;
+    return () => {
+      cancelled = true;
+    };
+  }, [editorSourceIdentity, editorSource.kind, editorSource.imageUrl, editorSource.displayUrl]);
+
+  // Measure the process image area so the drawing canvas can be
+  // laid exactly over the image's drawn rectangle.
+  useEffect(() => {
+    if (tab !== "process") return;
+    const el = processBoxRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setProcessBox({ w: r.width, h: r.height });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [tab]);
+
+  // Mirror the offscreen drawing onto the visible canvas whenever
+  // the process pane (re)mounts or the layer is (re)created.
+  useEffect(() => {
+    if (tab !== "process") return;
+    const disp = drawDisplayRef.current;
+    const src = drawCanvasRef.current;
+    if (!disp || !src) return;
+    if (disp.width !== src.width) disp.width = src.width;
+    if (disp.height !== src.height) disp.height = src.height;
+    const ctx = disp.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, disp.width, disp.height);
+    ctx.drawImage(src, 0, 0);
+  }, [tab, drawNatural, processBox]);
+
+  function syncDrawDisplay() {
+    const disp = drawDisplayRef.current;
+    const src = drawCanvasRef.current;
+    if (!disp || !src) return;
+    const ctx = disp.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, disp.width, disp.height);
+    ctx.drawImage(src, 0, 0);
+  }
+
+  function drawPointFromEvent(
+    e: { clientX: number; clientY: number },
+  ): { x: number; y: number; scale: number } | null {
+    const disp = drawDisplayRef.current;
+    if (!disp) return null;
+    const rect = disp.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * disp.width,
+      y: ((e.clientY - rect.top) / rect.height) * disp.height,
+      scale: disp.width / rect.width,
+    };
+  }
+
+  function drawDrawStroke(
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    scale: number,
+  ) {
+    const canvas = drawCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.lineWidth = (Number(drawBrush) || 24) * scale;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.globalAlpha = Math.max(0, Math.min(100, drawAlpha)) / 100;
+    if (drawTool === "eraser") {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.strokeStyle = "rgba(0, 0, 0, 1)";
+    } else {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = drawColor;
+    }
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    // A pen stroke always leaves paint behind; the eraser case is
+    // settled exactly on pointer-up (see onDrawPointerEnd).
+    if (drawTool !== "eraser") setDrawPainted(true);
+    syncDrawDisplay();
+  }
+
+  function onDrawPointerDown(e: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!drawOpen) return;
+    // A second finger is the start of a pinch, never a stroke.
+    if (drawDrawingRef.current) return;
+    const point = drawPointFromEvent(e);
+    if (!point) return;
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // A synthetic or already-released pointer: painting still
+      // works without capture.
+    }
+    // Snapshot the layer so a pinch can roll this stroke back.
+    const src = drawCanvasRef.current;
+    if (src) {
+      if (!drawSnapshotRef.current) {
+        drawSnapshotRef.current = document.createElement("canvas");
+      }
+      const snap = drawSnapshotRef.current;
+      snap.width = src.width;
+      snap.height = src.height;
+      snap.getContext("2d")?.drawImage(src, 0, 0);
+    }
+    drawDrawingRef.current = true;
+    drawLastPointRef.current = point;
+    drawDrawStroke(point, point, point.scale);
+  }
+
+  function onDrawPointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!drawDrawingRef.current) return;
+    const point = drawPointFromEvent(e);
+    if (!point) return;
+    const last = drawLastPointRef.current ?? point;
+    drawDrawStroke(last, point, point.scale);
+    drawLastPointRef.current = point;
+  }
+
+  function onDrawPointerEnd(e: ReactPointerEvent<HTMLCanvasElement>) {
+    drawDrawingRef.current = false;
+    drawLastPointRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setDrawPainted(drawHasPaint());
+  }
+
+  // A pinch starting mid-stroke cancels the stroke: the layer
+  // rolls back to the snapshot taken when the stroke began.
+  function cancelDrawStrokeForPinch() {
+    if (!drawDrawingRef.current) return;
+    drawDrawingRef.current = false;
+    drawLastPointRef.current = null;
+    const canvas = drawCanvasRef.current;
+    const snap = drawSnapshotRef.current;
+    if (canvas && snap && canvas.width === snap.width && canvas.height === snap.height) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(snap, 0, 0);
+      }
+      syncDrawDisplay();
+    }
+    setDrawPainted(drawHasPaint());
+  }
+
+  // Wipe the whole drawing layer (pane entry / a successful save).
+  function resetDrawLayer() {
+    const canvas = drawCanvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+    drawDrawingRef.current = false;
+    drawLastPointRef.current = null;
+    syncDrawDisplay();
+    setDrawPainted(false);
+  }
+
+  function drawHasPaint(): boolean {
+    const canvas = drawCanvasRef.current;
+    if (!canvas) return false;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    for (let i = 3; i < data.length; i += 4) {
+      if ((data[i] ?? 0) > 0) return true;
+    }
+    return false;
+  }
+
+  // The drawing layer as a raw base64 PNG (natural size, real
+  // colors + alpha over transparency) for createEditedJob.
+  function exportDrawBase64(): string | null {
+    const canvas = drawCanvasRef.current;
+    if (!canvas) return null;
+    const url = canvas.toDataURL("image/png");
     return url.split(",")[1] ?? null;
   }
 
@@ -5649,6 +5912,26 @@ export function App() {
     };
   }
 
+  // The 画像加工 drawing canvas's rectangle: the Editor image's
+  // drawn (object-contain) area inside the process image area,
+  // computed with the same letterbox math as maskRect.
+  let drawRect: { left: number; top: number; w: number; h: number } | null = null;
+  if (processBox && drawNatural && processBox.w > 0 && processBox.h > 0) {
+    const aspect = drawNatural.w / drawNatural.h;
+    let w = processBox.w;
+    let h = w / aspect;
+    if (h > processBox.h) {
+      h = processBox.h;
+      w = h * aspect;
+    }
+    drawRect = {
+      left: (processBox.w - w) / 2,
+      top: (processBox.h - h) / 2,
+      w,
+      h,
+    };
+  }
+
   const inpaintImageDisplay = (
     <div
       ref={(el) => {
@@ -6586,7 +6869,10 @@ export function App() {
               {editorSource.kind !== "none" && editorSource.displayUrl ? (
                 <>
                   <div
-                    ref={processZoom.areaRef}
+                    ref={(el) => {
+                      processBoxRef.current = el;
+                      processZoom.areaRef.current = el;
+                    }}
                     {...processZoom.handlers}
                     className="absolute inset-0 flex items-center justify-center overflow-hidden bg-[var(--surface-alt)]"
                     style={{ touchAction: "none" }}
@@ -6601,6 +6887,29 @@ export function App() {
                         transform: processZoom.transform,
                       }}
                     />
+                    {drawRect && drawNatural && (
+                      <canvas
+                        ref={drawDisplayRef}
+                        data-draw-canvas="true"
+                        aria-label="描画エリア"
+                        width={drawNatural.w}
+                        height={drawNatural.h}
+                        onPointerDown={onDrawPointerDown}
+                        onPointerMove={onDrawPointerMove}
+                        onPointerUp={onDrawPointerEnd}
+                        onPointerCancel={onDrawPointerEnd}
+                        className="absolute"
+                        style={{
+                          left: drawRect.left,
+                          top: drawRect.top,
+                          width: drawRect.w,
+                          height: drawRect.h,
+                          touchAction: "none",
+                          cursor: "crosshair",
+                          transform: processZoom.transform,
+                        }}
+                      />
+                    )}
                   </div>
                   {imageNamePlate("left-0")}
                   <button
@@ -6624,10 +6933,117 @@ export function App() {
                       <path d="m14 6-6 6 6 6" />
                     </svg>
                   </button>
+                  <button
+                    type="button"
+                    aria-label="描画"
+                    aria-pressed={drawOpen}
+                    onClick={() => setDrawOpen((v) => !v)}
+                    className="absolute bottom-2 left-2 z-10 flex items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
+                    style={{
+                      width: "3.375rem",
+                      height: "3.375rem",
+                      minHeight: "3.375rem",
+                      ...(drawOpen
+                        ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                        : {}),
+                    }}
+                  >
+                    <svg
+                      width="24"
+                      height="24"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      <path d="m15 5 4 4" />
+                    </svg>
+                  </button>
+                  {drawOpen && (
+                    <div
+                      className="absolute inset-x-0 z-10 grid border-t border-[var(--border)] bg-[var(--surface)]"
+                      role="group"
+                      aria-label="描画操作"
+                      style={{
+                        bottom: "4.375rem",
+                        gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                      }}
+                    >
+                      <label
+                        className="flex flex-col items-center justify-center gap-1 px-1 py-1"
+                        style={{ minHeight: "3.25rem" }}
+                      >
+                        <span className="text-[10px] leading-tight text-[var(--dim)]">色</span>
+                        <input
+                          type="color"
+                          aria-label="描画色"
+                          value={drawColor}
+                          onChange={(e) => setDrawColor(e.target.value)}
+                          className="h-6 w-10 cursor-pointer"
+                        />
+                      </label>
+                      <label
+                        className="flex flex-col items-center justify-center gap-1 px-2 py-1"
+                        style={{ minHeight: "3.25rem" }}
+                      >
+                        <span className="text-[10px] leading-tight text-[var(--dim)]">
+                          アルファ {drawAlpha}%
+                        </span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          aria-label="アルファ"
+                          value={drawAlpha}
+                          onChange={(e) => setDrawAlpha(Number(e.target.value))}
+                          className="w-full min-w-0"
+                        />
+                      </label>
+                      <label
+                        className="flex flex-col items-center justify-center gap-1 px-2 py-1"
+                        style={{ minHeight: "3.25rem" }}
+                      >
+                        <span className="text-[10px] leading-tight text-[var(--dim)]">
+                          太さ {drawBrush}
+                        </span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={100}
+                          step={1}
+                          aria-label="ブラシの太さ"
+                          value={drawBrush}
+                          onChange={(e) => setDrawBrush(Number(e.target.value))}
+                          className="w-full min-w-0"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        aria-label="描画モード"
+                        aria-pressed={drawTool === "eraser"}
+                        onClick={() =>
+                          setDrawTool((t) => (t === "pen" ? "eraser" : "pen"))
+                        }
+                        className="flex flex-col items-center justify-center gap-1 px-1 py-1"
+                        style={{ minHeight: "3.25rem" }}
+                      >
+                        <span className="text-[10px] leading-tight text-[var(--dim)]">モード</span>
+                        <span className="text-sm font-semibold leading-tight">
+                          {drawTool === "eraser" ? "消しゴム" : "ペン"}
+                        </span>
+                      </button>
+                    </div>
+                  )}
                   {editError && (
                     <p
                       role="alert"
-                      className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
+                      className="absolute left-2 max-w-[calc(100%-1rem)] border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
+                      style={{ bottom: drawOpen ? "8.5rem" : "4.5rem" }}
                     >
                       {editError}
                     </p>
@@ -6719,6 +7135,9 @@ export function App() {
                   }
                   onClick={() => {
                     setEditError(null);
+                    const drawing = drawPainted
+                      ? (exportDrawBase64() ?? undefined)
+                      : undefined;
                     if (editorSource.kind === "job" && editorSource.jobId != null) {
                       createEditedJob.mutate({
                         sourceKind: "job",
@@ -6726,6 +7145,7 @@ export function App() {
                         brightness: tone.brightness,
                         saturation: tone.saturation,
                         contrast: tone.contrast,
+                        drawing,
                       });
                     } else if (
                       editorSource.kind === "upload" &&
@@ -6737,6 +7157,7 @@ export function App() {
                         brightness: tone.brightness,
                         saturation: tone.saturation,
                         contrast: tone.contrast,
+                        drawing,
                       });
                     }
                   }}
@@ -6925,6 +7346,9 @@ export function App() {
                     onClick={() => {
                       setTone({ brightness: 0, saturation: 0, contrast: 0 });
                       setToneOpen(false);
+                      setDrawOpen(false);
+                      setDrawTool("pen");
+                      resetDrawLayer();
                       setEditError(null);
                       switchTab("process");
                     }}
