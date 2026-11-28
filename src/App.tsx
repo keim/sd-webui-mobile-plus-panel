@@ -2057,6 +2057,7 @@ export function App() {
       setTone({ brightness: 0, saturation: 0, contrast: 0 });
       setToneOpen(false);
       setDrawOpen(false);
+      setLayerOpen(false);
       resetDrawLayer();
       setEditError(null);
       switchTab("editor");
@@ -2217,6 +2218,15 @@ export function App() {
   // percent (-100..100, 0 = untouched). Reset on every entry
   // from the Preview pane.
   const [toneOpen, setToneOpen] = useState(false);
+  const [layerOpen, setLayerOpen] = useState(false);
+
+  // The process pane's floating tool menu is exclusive: zero or
+  // one tool (draw / tone / layer) is active at a time.
+  function selectProcessTool(tool: "draw" | "tone" | "layer") {
+    setDrawOpen(tool === "draw" ? !drawOpen : false);
+    setToneOpen(tool === "tone" ? !toneOpen : false);
+    setLayerOpen(tool === "layer" ? !layerOpen : false);
+  }
   const [tone, setTone] = useState({ brightness: 0, saturation: 0, contrast: 0 });
   const [editError, setEditError] = useState<string | null>(null);
   // 画像加工の描画: freehand drawing over the image, operated like
@@ -7031,7 +7041,7 @@ export function App() {
             aria-label="画像加工"
             className="relative grid h-full min-h-0 min-w-0"
             style={{
-              gridTemplateRows: "1fr auto",
+              gridTemplateRows: "1fr",
               gridTemplateColumns: "minmax(0, 1fr)",
             }}
           >
@@ -7127,7 +7137,7 @@ export function App() {
                       role="group"
                       aria-label="描画操作"
                       style={{
-                        bottom: "0.5rem",
+                        bottom: "4.25rem",
                         gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
                       }}
                     >
@@ -7201,11 +7211,197 @@ export function App() {
                     <p
                       role="alert"
                       className="absolute left-2 max-w-[calc(100%-1rem)] border border-[var(--err)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--err)]"
-                      style={{ bottom: drawOpen ? "4.25rem" : "0.5rem" }}
+                      style={{ top: "4.25rem" }}
                     >
                       {editError}
                     </p>
                   )}
+                  {toneOpen && (
+                    <div
+                      className="absolute inset-x-0 z-10 grid gap-3 border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3"
+                      aria-label="色調調整"
+                      style={{ bottom: "4.25rem" }}
+                    >
+                      {(
+                        [
+                          ["brightness", "明度"],
+                          ["saturation", "彩度"],
+                          ["contrast", "コントラスト"],
+                        ] as const
+                      ).map(([key, label]) => (
+                        <label key={key} className="flex items-center gap-3 text-sm">
+                          <span className="w-14 shrink-0">{label}</span>
+                          <input
+                            type="range"
+                            min={-100}
+                            max={100}
+                            step={1}
+                            value={tone[key]}
+                            aria-label={`${label}の調整`}
+                            onChange={(e) =>
+                              setTone((t) => ({ ...t, [key]: Number(e.target.value) }))
+                            }
+                            className="min-w-0 flex-1"
+                          />
+                          <span className="w-12 shrink-0 text-right text-xs" style={{ fontFamily: "var(--mono)" }}>
+                            {tone[key] > 0 ? `+${tone[key]}` : tone[key]}%
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                  {layerOpen && (
+                    <div
+                      className="absolute inset-x-0 z-10 border-t border-[var(--border)] bg-[var(--surface)]"
+                      role="group"
+                      aria-label="レイヤーパネル"
+                      style={{ bottom: "4.25rem" }}
+                    >
+                      <button
+                        type="button"
+                        aria-label="加工を保存"
+                        disabled={
+                          createEditedJob.isPending ||
+                          !(
+                            (editorSource.kind === "job" && editorSource.jobId != null) ||
+                            (editorSource.kind === "upload" && editorSource.uploadId != null)
+                          )
+                        }
+                        onClick={() => {
+                          setEditError(null);
+                          const drawing = drawPainted
+                            ? (exportDrawBase64() ?? undefined)
+                            : undefined;
+                          if (editorSource.kind === "job" && editorSource.jobId != null) {
+                            createEditedJob.mutate({
+                              sourceKind: "job",
+                              jobId: editorSource.jobId,
+                              brightness: tone.brightness,
+                              saturation: tone.saturation,
+                              contrast: tone.contrast,
+                              drawing,
+                            });
+                          } else if (
+                            editorSource.kind === "upload" &&
+                            editorSource.uploadId != null
+                          ) {
+                            createEditedJob.mutate({
+                              sourceKind: "upload",
+                              uploadId: editorSource.uploadId,
+                              brightness: tone.brightness,
+                              saturation: tone.saturation,
+                              contrast: tone.contrast,
+                              drawing,
+                            });
+                          }
+                        }}
+                        className="flex w-full items-center justify-center px-1 py-0 text-sm font-semibold disabled:opacity-50"
+                        style={{ minHeight: "3.25rem" }}
+                      >
+                        保存
+                      </button>
+                    </div>
+                  )}
+                  <div
+                    role="group"
+                    aria-label="加工メニュー"
+                    className="absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-1 shadow-lg"
+                    style={{
+                      bottom: "calc(0.5rem + env(safe-area-inset-bottom))",
+                      height: "3.375rem",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      aria-label="描画"
+                      aria-pressed={drawOpen}
+                      onClick={() => selectProcessTool("draw")}
+                      className="flex items-center justify-center rounded-full"
+                      style={{
+                        width: "3rem",
+                        height: "3rem",
+                        ...(drawOpen
+                          ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                          : {}),
+                      }}
+                    >
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                        <path d="m15 5 4 4" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="調整"
+                      aria-pressed={toneOpen}
+                      onClick={() => selectProcessTool("tone")}
+                      className="flex items-center justify-center rounded-full"
+                      style={{
+                        width: "3rem",
+                        height: "3rem",
+                        ...(toneOpen
+                          ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                          : {}),
+                      }}
+                    >
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <line x1="21" x2="14" y1="4" y2="4" />
+                        <line x1="10" x2="3" y1="4" y2="4" />
+                        <line x1="21" x2="12" y1="12" y2="12" />
+                        <line x1="8" x2="3" y1="12" y2="12" />
+                        <line x1="21" x2="16" y1="20" y2="20" />
+                        <line x1="12" x2="3" y1="20" y2="20" />
+                        <line x1="14" x2="14" y1="2" y2="6" />
+                        <line x1="8" x2="8" y1="10" y2="14" />
+                        <line x1="16" x2="16" y1="18" y2="22" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="切り抜き"
+                      disabled
+                      className="flex items-center justify-center rounded-full text-[var(--dim)] disabled:opacity-50"
+                      style={{ width: "3rem", height: "3rem" }}
+                    >
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+                        <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="漫画"
+                      disabled
+                      className="flex items-center justify-center rounded-full text-[var(--dim)] disabled:opacity-50"
+                      style={{ width: "3rem", height: "3rem" }}
+                    >
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <rect x="3" y="3" width="18" height="18" rx="1" />
+                        <path d="M3 12h18" />
+                        <path d="M12 12v9" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="レイヤー"
+                      aria-pressed={layerOpen}
+                      onClick={() => selectProcessTool("layer")}
+                      className="flex items-center justify-center rounded-full"
+                      style={{
+                        width: "3rem",
+                        height: "3rem",
+                        ...(layerOpen
+                          ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
+                          : {}),
+                      }}
+                    >
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                        <polyline points="2 17 12 22 22 17" />
+                        <polyline points="2 12 12 17 22 12" />
+                      </svg>
+                    </button>
+                  </div>
                 </>
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center bg-[var(--surface-alt)]">
@@ -7214,130 +7410,6 @@ export function App() {
                   </span>
                 </div>
               )}
-            </div>
-            <div
-              className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)]"
-              style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
-            >
-              {toneOpen && (
-                <div className="grid gap-3 px-4 py-3" aria-label="色調調整">
-                  {(
-                    [
-                      ["brightness", "明度"],
-                      ["saturation", "彩度"],
-                      ["contrast", "コントラスト"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <label key={key} className="flex items-center gap-3 text-sm">
-                      <span className="w-14 shrink-0">{label}</span>
-                      <input
-                        type="range"
-                        min={-100}
-                        max={100}
-                        step={1}
-                        value={tone[key]}
-                        aria-label={`${label}の調整`}
-                        onChange={(e) =>
-                          setTone((t) => ({ ...t, [key]: Number(e.target.value) }))
-                        }
-                        className="min-w-0 flex-1"
-                      />
-                      <span className="w-12 shrink-0 text-right text-xs" style={{ fontFamily: "var(--mono)" }}>
-                        {tone[key] > 0 ? `+${tone[key]}` : tone[key]}%
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              <div
-                className="grid"
-                role="group"
-                aria-label="加工操作"
-                style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
-              >
-                <button
-                  type="button"
-                  aria-label="描画"
-                  aria-pressed={drawOpen}
-                  onClick={() => setDrawOpen((v) => !v)}
-                  className={`flex items-center justify-center px-1 py-0 text-sm font-semibold ${drawOpen ? "" : "bg-[var(--surface)]"}`}
-                  style={{
-                    minHeight: "2.5rem",
-                    ...(drawOpen
-                      ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
-                      : {}),
-                  }}
-                >
-                  描画
-                </button>
-                <button
-                  type="button"
-                  aria-label="色調"
-                  aria-pressed={toneOpen}
-                  onClick={() => setToneOpen((v) => !v)}
-                  className={`flex items-center justify-center px-1 py-0 text-sm font-semibold ${toneOpen ? "" : "bg-[var(--surface)]"}`}
-                  style={{
-                    minHeight: "2.5rem",
-                    ...(toneOpen
-                      ? { backgroundColor: "var(--accent)", color: "var(--accent-text)" }
-                      : {}),
-                  }}
-                >
-                  色調
-                </button>
-                <button
-                  type="button"
-                  aria-label="変形"
-                  disabled
-                  className="flex items-center justify-center px-1 py-0 bg-[var(--surface)] text-sm font-semibold text-[var(--dim)] disabled:opacity-60"
-                  style={{ minHeight: "2.5rem" }}
-                >
-                  変形
-                </button>
-                <button
-                  type="button"
-                  aria-label="加工を保存"
-                  disabled={
-                    createEditedJob.isPending ||
-                    !(
-                      (editorSource.kind === "job" && editorSource.jobId != null) ||
-                      (editorSource.kind === "upload" && editorSource.uploadId != null)
-                    )
-                  }
-                  onClick={() => {
-                    setEditError(null);
-                    const drawing = drawPainted
-                      ? (exportDrawBase64() ?? undefined)
-                      : undefined;
-                    if (editorSource.kind === "job" && editorSource.jobId != null) {
-                      createEditedJob.mutate({
-                        sourceKind: "job",
-                        jobId: editorSource.jobId,
-                        brightness: tone.brightness,
-                        saturation: tone.saturation,
-                        contrast: tone.contrast,
-                        drawing,
-                      });
-                    } else if (
-                      editorSource.kind === "upload" &&
-                      editorSource.uploadId != null
-                    ) {
-                      createEditedJob.mutate({
-                        sourceKind: "upload",
-                        uploadId: editorSource.uploadId,
-                        brightness: tone.brightness,
-                        saturation: tone.saturation,
-                        contrast: tone.contrast,
-                        drawing,
-                      });
-                    }
-                  }}
-                  className="flex items-center justify-center px-1 py-0 bg-[var(--surface)] text-sm font-semibold disabled:opacity-50"
-                  style={{ minHeight: "2.5rem" }}
-                >
-                  保存
-                </button>
-              </div>
             </div>
           </section>
         )}
@@ -7518,6 +7590,7 @@ export function App() {
                       setTone({ brightness: 0, saturation: 0, contrast: 0 });
                       setToneOpen(false);
                       setDrawOpen(false);
+                      setLayerOpen(false);
                       setDrawTool("pen");
                       resetDrawLayer();
                       setEditError(null);
