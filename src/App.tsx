@@ -487,10 +487,7 @@ const PIXEL_SIZES: number[] = [1024, 1280, 1440];
 // The Inpaint mask brush uses the same list; its blur gets a
 // smaller stepped list of its own (the value is a mask-blur px).
 const DRAW_BRUSH_SIZES: number[] = [2, 4, 7, 10, 15, 20, 40, 70, 100, 150, 200, 400, 700];
-// The Inpaint blur shares the brush's stepped list (same slider
-// spec as the process pane's draw brush), with 0 (no blur) kept
-// at the head.
-const MASK_BLUR_SIZES: number[] = [0, ...DRAW_BRUSH_SIZES];
+const MASK_BLUR_SIZES: number[] = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16];
 
 // Color-temperature channel gains for a -100..100 slider value
 // (positive = warm). The single definition shared by the CSS
@@ -6579,7 +6576,7 @@ export function App() {
     </div>
   ) : editorPopup === "blur" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="ブラー設定">
-      <label className="flex flex-col gap-1">
+      <label className="flex flex-col items-center justify-center gap-1 px-2 py-1">
         <span className="text-[10px] leading-tight text-[var(--dim)]">
           ブラー {maskBlur}
         </span>
@@ -6601,13 +6598,13 @@ export function App() {
           onLostPointerCapture={() => setMaskBlurChanging(false)}
           onFocus={() => setMaskBlurChanging(true)}
           onBlur={() => setMaskBlurChanging(false)}
-          className="w-full"
+          className="w-full min-w-0"
         />
       </label>
     </div>
   ) : editorPopup === "brush" ? (
     <div className={popupPanelCompactCls} role="dialog" aria-label="線幅設定">
-      <label className="flex flex-col gap-1">
+      <label className="flex flex-col items-center justify-center gap-1 px-2 py-1">
         <span className="text-[10px] leading-tight text-[var(--dim)]">
           線幅 {brushSize}
         </span>
@@ -6629,7 +6626,7 @@ export function App() {
         onLostPointerCapture={() => setMaskBrushChanging(false)}
         onFocus={() => setMaskBrushChanging(true)}
         onBlur={() => setMaskBrushChanging(false)}
-        className="w-full"
+        className="w-full min-w-0"
       />
       </label>
     </div>
